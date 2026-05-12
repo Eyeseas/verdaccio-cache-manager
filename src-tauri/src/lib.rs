@@ -2,6 +2,7 @@ pub mod config;
 pub mod local_scanner;
 pub mod parser;
 pub mod registry_client;
+pub mod storage_scanner;
 pub mod task_engine;
 
 use config::AppConfig;
@@ -41,6 +42,18 @@ async fn search_packages(
 ) -> Result<Vec<SearchResult>, String> {
     let client = registry_client::RegistryClient::new(&registry_url);
     client.search(&query).await
+}
+
+#[tauri::command]
+async fn list_cached_via_plugin(registry_url: String) -> Result<Vec<SearchResult>, String> {
+    let client = registry_client::RegistryClient::new(&registry_url);
+    client.list_cached_via_plugin().await
+}
+
+#[tauri::command]
+async fn scan_verdaccio_storage(storage_path: String) -> Result<Vec<SearchResult>, String> {
+    let path = PathBuf::from(&storage_path);
+    storage_scanner::scan_storage(&path)
 }
 
 #[tauri::command]
@@ -248,6 +261,8 @@ pub fn run() {
             save_config,
             test_connection,
             search_packages,
+            list_cached_via_plugin,
+            scan_verdaccio_storage,
             get_package_versions,
             get_cached_versions,
             start_cache_tasks,

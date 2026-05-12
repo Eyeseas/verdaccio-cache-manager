@@ -1,0 +1,20 @@
+{
+  "name": "verdaccio-plugin-cached-list",
+  "version": "0.1.0",
+  "description": "Verdaccio middleware plugin that exposes cached packages (including proxy-cached) via GET /-/cached-packages",
+  "keywords": [
+    "verdaccio",
+    "verdaccio-plugin",
+    "middleware",
+    "cache"
+  ],
+  "main": "index.js",
+  "engines": {
+    "node": ">=14"
+  },
+  "license": "MIT",
+  "files": [
+    "index.js",
+    "README.md"
+  ]
+}

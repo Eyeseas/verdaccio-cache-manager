@@ -6,6 +6,7 @@ export interface AppConfig {
   concurrency: number;
   retry_count: number;
   timeout_secs: number;
+  verdaccio_storage_path: string | null;
 }
 
 interface ConfigStore {
@@ -22,6 +23,7 @@ export const useConfigStore = create<ConfigStore>((set) => ({
     concurrency: 5,
     retry_count: 3,
     timeout_secs: 60,
+    verdaccio_storage_path: null,
   },
   loading: false,
 

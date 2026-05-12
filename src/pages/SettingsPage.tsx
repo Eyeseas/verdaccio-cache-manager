@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { open } from "@tauri-apps/plugin-dialog";
 import { useConfigStore } from "@/stores/configStore";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -10,6 +11,7 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import { FolderOpen } from "lucide-react";
 
 export function SettingsPage() {
   const { config, loadConfig, saveConfig, testConnection } = useConfigStore();
@@ -120,6 +122,42 @@ export function SettingsPage() {
                 }
               />
             </div>
+          </div>
+
+          <div className="space-y-2 border-t pt-4">
+            <Label htmlFor="storage_path">Verdaccio storage 路径（可选）</Label>
+            <div className="flex gap-2">
+              <Input
+                id="storage_path"
+                value={form.verdaccio_storage_path ?? ""}
+                onChange={(e) =>
+                  setForm({
+                    ...form,
+                    verdaccio_storage_path: e.target.value || null,
+                  })
+                }
+                placeholder="/path/to/verdaccio/storage 或挂载点"
+              />
+              <Button
+                variant="outline"
+                onClick={async () => {
+                  const selected = await open({
+                    directory: true,
+                    multiple: false,
+                  });
+                  if (typeof selected === "string") {
+                    setForm({ ...form, verdaccio_storage_path: selected });
+                  }
+                }}
+              >
+                <FolderOpen className="h-4 w-4" />
+              </Button>
+            </div>
+            <p className="text-xs text-muted-foreground">
+              用于在「搜索 → Verdaccio」中列出已缓存包（含 proxy
+              缓存）。可填本地路径或通过 SMB/NFS/sshfs 挂载的远程目录。若 Verdaccio
+              安装了 verdaccio-plugin-cached-list 插件则可不填。
+            </p>
           </div>
 
           <Button onClick={handleSave}>保存配置</Button>

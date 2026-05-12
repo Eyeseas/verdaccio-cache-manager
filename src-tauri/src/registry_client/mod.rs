@@ -14,6 +14,8 @@ pub struct SearchResult {
     pub description: Option<String>,
     pub latest_version: Option<String>,
     pub versions: Vec<String>,
+    #[serde(default)]
+    pub cached_versions: Vec<String>,
 }
 
 pub struct RegistryClient {
@@ -76,6 +78,66 @@ impl RegistryClient {
         Ok(())
     }
 
+    pub async fn list_cached_via_plugin(&self) -> Result<Vec<SearchResult>, String> {
+        let url = format!("{}/-/cached-packages", self.registry_url);
+        let resp = self
+            .http
+            .get(&url)
+            .header("accept", "application/json")
+            .send()
+            .await
+            .map_err(|e| format!("请求插件接口失败: {}", e))?;
+
+        let status = resp.status();
+        if status.as_u16() == 404 {
+            return Err("PLUGIN_NOT_INSTALLED".to_string());
+        }
+        if !status.is_success() {
+            return Err(format!("插件接口请求失败 (HTTP {})", status));
+        }
+
+        let body: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| format!("解析响应失败: {}", e))?;
+
+        let arr = body
+            .as_array()
+            .ok_or_else(|| "响应不是数组".to_string())?;
+
+        let results = arr
+            .iter()
+            .filter_map(|pkg| {
+                let name = pkg["name"].as_str()?.to_string();
+                let str_arr = |key: &str| -> Vec<String> {
+                    pkg[key]
+                        .as_array()
+                        .map(|a| {
+                            a.iter()
+                                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                                .collect()
+                        })
+                        .unwrap_or_default()
+                };
+                let versions = str_arr("versions");
+                let cached_versions = str_arr("cached_versions");
+                Some(SearchResult {
+                    name,
+                    description: pkg["description"].as_str().map(|s| s.to_string()),
+                    latest_version: pkg["latest"]
+                        .as_str()
+                        .map(|s| s.to_string())
+                        .or_else(|| cached_versions.last().cloned())
+                        .or_else(|| versions.last().cloned()),
+                    versions,
+                    cached_versions,
+                })
+            })
+            .collect();
+
+        Ok(results)
+    }
+
     pub async fn search(&self, query: &str) -> Result<Vec<SearchResult>, String> {
         let url = format!("{}/-/v1/search?text={}&size=20", self.registry_url, query);
         let resp = self
@@ -97,6 +159,7 @@ impl RegistryClient {
                     description: pkg["description"].as_str().map(|s| s.to_string()),
                     latest_version: pkg["version"].as_str().map(|s| s.to_string()),
                     versions: vec![],
+                    cached_versions: vec![],
                 })
             })
             .collect();

@@ -8,6 +8,8 @@ pub struct AppConfig {
     pub concurrency: u32,
     pub retry_count: u32,
     pub timeout_secs: u64,
+    #[serde(default)]
+    pub verdaccio_storage_path: Option<String>,
 }
 
 impl Default for AppConfig {
@@ -17,6 +19,7 @@ impl Default for AppConfig {
             concurrency: 5,
             retry_count: 3,
             timeout_secs: 60,
+            verdaccio_storage_path: None,
         }
     }
 }

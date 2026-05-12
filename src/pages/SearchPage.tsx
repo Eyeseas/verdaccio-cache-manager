@@ -1,4 +1,4 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useConfigStore } from "@/stores/configStore";
 import { useTaskStore } from "@/stores/taskStore";
@@ -7,13 +7,20 @@ import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Checkbox } from "@/components/ui/checkbox";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { Search, Loader2, ChevronDown, ChevronRight } from "lucide-react";
+import {
+  Search,
+  Loader2,
+  ChevronDown,
+  ChevronRight,
+  Check,
+} from "lucide-react";
 
 interface SearchResult {
   name: string;
   description: string | null;
   latest_version: string | null;
   versions: string[];
+  cached_versions: string[];
 }
 
 interface ExpandedPackage {
@@ -35,6 +42,11 @@ export function SearchPage() {
   const [query, setQuery] = useState("");
   const [source, setSource] = useState<RegistrySource>("npmjs");
   const [results, setResults] = useState<SearchResult[]>([]);
+  const [cachedAll, setCachedAll] = useState<SearchResult[]>([]);
+  const [cachedSource, setCachedSource] = useState<
+    "plugin" | "storage" | "none"
+  >("none");
+  const [cachedError, setCachedError] = useState<string | null>(null);
   const [searching, setSearching] = useState(false);
   const [expanded, setExpanded] = useState<Record<string, ExpandedPackage>>({});
   const [selected, setSelected] = useState<Map<string, Set<string>>>(
@@ -45,7 +57,74 @@ export function SearchPage() {
   const registryUrl =
     source === "npmjs" ? "https://registry.npmjs.org" : config.registry_url;
 
+  const loadCachedPackages = useCallback(async () => {
+    setSearching(true);
+    setCachedError(null);
+    try {
+      try {
+        const viaPlugin = await invoke<SearchResult[]>(
+          "list_cached_via_plugin",
+          { registryUrl: config.registry_url }
+        );
+        setCachedAll(viaPlugin);
+        setCachedSource("plugin");
+        return;
+      } catch (e) {
+        const msg = String(e);
+        if (!msg.includes("PLUGIN_NOT_INSTALLED")) {
+          console.warn("plugin endpoint 错误:", e);
+        }
+      }
+
+      if (config.verdaccio_storage_path) {
+        try {
+          const res = await invoke<SearchResult[]>("scan_verdaccio_storage", {
+            storagePath: config.verdaccio_storage_path,
+          });
+          setCachedAll(res);
+          setCachedSource("storage");
+          return;
+        } catch (e) {
+          setCachedError(`扫描 storage 失败: ${e}`);
+        }
+      } else {
+        setCachedError(
+          "未安装 verdaccio-plugin-cached-list 插件，且未配置 storage 路径（设置页中可填）"
+        );
+      }
+      setCachedAll([]);
+      setCachedSource("none");
+    } finally {
+      setSearching(false);
+    }
+  }, [config.registry_url, config.verdaccio_storage_path]);
+
+  useEffect(() => {
+    loadCachedPackages();
+  }, [loadCachedPackages]);
+
+  useEffect(() => {
+    if (source === "npmjs") setResults([]);
+    setExpanded({});
+  }, [source]);
+
+  const filteredCached = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return cachedAll;
+    return cachedAll.filter(
+      (p) =>
+        p.name.toLowerCase().includes(q) ||
+        (p.description?.toLowerCase().includes(q) ?? false)
+    );
+  }, [cachedAll, query]);
+
+  const displayResults = source === "verdaccio" ? filteredCached : results;
+
   const handleSearch = useCallback(async () => {
+    if (source === "verdaccio") {
+      await loadCachedPackages();
+      return;
+    }
     if (!query.trim()) return;
     setSearching(true);
     setResults([]);
@@ -60,13 +139,36 @@ export function SearchPage() {
     } finally {
       setSearching(false);
     }
-  }, [query, registryUrl]);
+  }, [query, registryUrl, source, loadCachedPackages]);
+
+  const cachedVersionsByName = useMemo(() => {
+    const map = new Map<string, Set<string>>();
+    cachedAll.forEach((p) =>
+      map.set(p.name, new Set(p.cached_versions))
+    );
+    return map;
+  }, [cachedAll]);
+
+  const localPackageByName = useMemo(() => {
+    const map = new Map<string, SearchResult>();
+    cachedAll.forEach((p) => map.set(p.name, p));
+    return map;
+  }, [cachedAll]);
 
   const toggleExpand = async (name: string) => {
     if (expanded[name]) {
       const next = { ...expanded };
       delete next[name];
       setExpanded(next);
+      return;
+    }
+
+    const local = localPackageByName.get(name);
+    if (local && local.versions.length > 0) {
+      setExpanded((prev) => ({
+        ...prev,
+        [name]: { name, versions: local.versions, loading: false },
+      }));
       return;
     }
 
@@ -77,7 +179,7 @@ export function SearchPage() {
 
     try {
       const versions = await invoke<string[]>("get_package_versions", {
-        registryUrl,
+        registryUrl: "https://registry.npmjs.org",
         packageName: name,
       });
 
@@ -86,9 +188,10 @@ export function SearchPage() {
         [name]: { name, versions, loading: false },
       }));
     } catch {
+      const fallback = local?.cached_versions ?? [];
       setExpanded((prev) => ({
         ...prev,
-        [name]: { name, versions: [], loading: false },
+        [name]: { name, versions: fallback, loading: false },
       }));
     }
   };
@@ -168,7 +271,11 @@ export function SearchPage() {
             <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
             <Input
               className="pl-9"
-              placeholder="搜索 npm 包..."
+              placeholder={
+                source === "verdaccio"
+                  ? "在已缓存的包中过滤..."
+                  : "搜索 npm 包..."
+              }
               value={query}
               onChange={(e) => setQuery(e.target.value)}
               onKeyDown={(e) => e.key === "Enter" && handleSearch()}
@@ -178,24 +285,38 @@ export function SearchPage() {
           <Button onClick={handleSearch} disabled={searching}>
             {searching ? (
               <Loader2 className="h-4 w-4 animate-spin" />
+            ) : source === "verdaccio" ? (
+              "刷新"
             ) : (
               "搜索"
             )}
           </Button>
         </div>
 
-        <label className="flex items-center gap-2 text-sm">
-          <Checkbox
-            checked={stableOnly}
-            onCheckedChange={(v) => setStableOnly(v === true)}
-          />
-          <span>仅显示正式版本</span>
-        </label>
+        <div className="flex items-center justify-between">
+          <label className="flex items-center gap-2 text-sm">
+            <Checkbox
+              checked={stableOnly}
+              onCheckedChange={(v) => setStableOnly(v === true)}
+            />
+            <span>仅显示正式版本</span>
+          </label>
+
+          {source === "verdaccio" && cachedSource !== "none" && (
+            <span className="text-xs text-muted-foreground">
+              来源：
+              {cachedSource === "plugin"
+                ? "verdaccio 插件接口"
+                : "storage 目录扫描"}
+              · 共 {cachedAll.length} 个包
+            </span>
+          )}
+        </div>
       </div>
 
       <ScrollArea className="flex-1">
         <div className="space-y-1">
-          {results.map((pkg) => (
+          {displayResults.map((pkg) => (
             <div key={pkg.name} className="rounded-lg border">
               <div
                 className="flex cursor-pointer items-center gap-3 p-3 hover:bg-muted/50"
@@ -233,8 +354,24 @@ export function SearchPage() {
                       <div className="flex flex-wrap gap-2 py-1">
                         {getFilteredVersions(expanded[pkg.name].versions).map(
                           (v) => {
+                            const isCached =
+                              cachedVersionsByName.get(pkg.name)?.has(v) ??
+                              false;
                             const isSelected =
                               selected.get(pkg.name)?.has(v) || false;
+
+                            if (isCached) {
+                              return (
+                                <span
+                                  key={v}
+                                  title="已缓存到 Verdaccio"
+                                  className="flex items-center gap-1.5 rounded-md border border-emerald-500/40 bg-emerald-500/10 px-2 py-1 text-sm text-emerald-700 dark:text-emerald-400"
+                                >
+                                  <Check className="h-3.5 w-3.5" />
+                                  <span>{v}</span>
+                                </span>
+                              );
+                            }
 
                             return (
                               <label
@@ -273,10 +410,20 @@ export function SearchPage() {
             </div>
           ))}
 
-          {!searching && results.length === 0 && query && (
-            <p className="py-8 text-center text-muted-foreground">
-              未找到匹配的包
-            </p>
+          {!searching && displayResults.length === 0 && (
+            <div className="py-8 text-center text-muted-foreground">
+              {source === "verdaccio" ? (
+                cachedError ? (
+                  <p className="text-sm">{cachedError}</p>
+                ) : cachedAll.length === 0 ? (
+                  <p>Verdaccio 暂无已缓存的包</p>
+                ) : (
+                  <p>未找到匹配的包</p>
+                )
+              ) : query ? (
+                <p>未找到匹配的包</p>
+              ) : null}
+            </div>
           )}
         </div>
       </ScrollArea>
