@@ -129,8 +129,39 @@ impl RegistryClient {
             .send()
             .await
             .map_err(|e| e.to_string())?;
+        if !resp.status().is_success() {
+            return Err(format!("HTTP {}", resp.status()));
+        }
         let bytes = resp.bytes().await.map_err(|e| e.to_string())?;
         Ok(bytes.to_vec())
+    }
+
+    pub async fn trigger_proxy_cache(&self, package_name: &str, version: &str) -> Result<(), String> {
+        let name_part = if package_name.starts_with('@') {
+            package_name.split('/').last().unwrap_or(package_name)
+        } else {
+            package_name
+        };
+        let tarball_url = format!(
+            "{}/{}/-/{}-{}.tgz",
+            self.registry_url, package_name, name_part, version
+        );
+
+        let resp = self
+            .http
+            .get(&tarball_url)
+            .send()
+            .await
+            .map_err(|e| format!("代理缓存请求失败: {}", e))?;
+
+        if resp.status().is_success() {
+            let _ = resp.bytes().await;
+            Ok(())
+        } else if resp.status().as_u16() == 404 {
+            Err(format!("包 {}@{} 在上游不存在", package_name, version))
+        } else {
+            Err(format!("代理缓存失败 ({})", resp.status()))
+        }
     }
 
     pub async fn publish_package(

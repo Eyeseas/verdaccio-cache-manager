@@ -134,6 +134,78 @@ async fn execute_single_task(
     retry_count: u32,
     timeout_secs: u64,
 ) {
+    let is_local_source = task.tarball_url.as_ref().map_or(false, |u| u.starts_with("file://"));
+    let use_proxy_cache = !is_local_source && source_registry.contains("npmjs.org");
+
+    if use_proxy_cache {
+        execute_proxy_cache(task, tasks, app, target_registry, retry_count, timeout_secs).await;
+    } else {
+        execute_publish(task, tasks, app, source_registry, target_registry, retry_count, timeout_secs).await;
+    }
+}
+
+async fn execute_proxy_cache(
+    task: CacheTask,
+    tasks: Arc<Mutex<Vec<CacheTask>>>,
+    app: AppHandle,
+    target_registry: &str,
+    retry_count: u32,
+    timeout_secs: u64,
+) {
+    let target_client = RegistryClient::new(target_registry);
+
+    update_task_status(&tasks, &task.id, TaskStatus::Downloading, None, &app).await;
+
+    for attempt in 0..=retry_count {
+        match tokio::time::timeout(
+            Duration::from_secs(timeout_secs),
+            target_client.trigger_proxy_cache(&task.package_name, &task.version),
+        )
+        .await
+        {
+            Ok(Ok(())) => {
+                update_task_status(&tasks, &task.id, TaskStatus::Success, None, &app).await;
+                return;
+            }
+            Ok(Err(e)) => {
+                if attempt == retry_count {
+                    update_task_status(
+                        &tasks,
+                        &task.id,
+                        TaskStatus::Failed,
+                        Some(format!("缓存失败: {}", e)),
+                        &app,
+                    )
+                    .await;
+                    return;
+                }
+            }
+            Err(_) => {
+                if attempt == retry_count {
+                    update_task_status(
+                        &tasks,
+                        &task.id,
+                        TaskStatus::Failed,
+                        Some("缓存超时".to_string()),
+                        &app,
+                    )
+                    .await;
+                    return;
+                }
+            }
+        }
+    }
+}
+
+async fn execute_publish(
+    task: CacheTask,
+    tasks: Arc<Mutex<Vec<CacheTask>>>,
+    app: AppHandle,
+    source_registry: &str,
+    target_registry: &str,
+    retry_count: u32,
+    timeout_secs: u64,
+) {
     let source_client = RegistryClient::new(source_registry);
     let mut target_client = RegistryClient::new(target_registry);
 
