@@ -45,7 +45,8 @@ export function SettingsPage() {
   };
 
   return (
-    <div className="p-6 max-w-2xl">
+    <div className="h-full overflow-y-auto p-6">
+      <div className="max-w-2xl">
       <h1 className="text-2xl font-bold mb-6">设置</h1>
 
       <Card>
@@ -163,6 +164,7 @@ export function SettingsPage() {
           <Button onClick={handleSave}>保存配置</Button>
         </CardContent>
       </Card>
+      </div>
     </div>
   );
 }

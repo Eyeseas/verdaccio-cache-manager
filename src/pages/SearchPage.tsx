@@ -2,6 +2,7 @@ import { useState, useCallback, useEffect, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useConfigStore } from "@/stores/configStore";
 import { useTaskStore } from "@/stores/taskStore";
+import { useCacheStore, type CachedPackage } from "@/stores/cacheStore";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
@@ -13,15 +14,10 @@ import {
   ChevronDown,
   ChevronRight,
   Check,
+  RefreshCw,
 } from "lucide-react";
 
-interface SearchResult {
-  name: string;
-  description: string | null;
-  latest_version: string | null;
-  versions: string[];
-  cached_versions: string[];
-}
+type SearchResult = CachedPackage;
 
 interface ExpandedPackage {
   name: string;
@@ -35,18 +31,30 @@ function isStableVersion(v: string): boolean {
   return /^\d+\.\d+\.\d+$/.test(v);
 }
 
+function formatRelativeTime(ts: number): string {
+  const diffSec = Math.floor((Date.now() - ts) / 1000);
+  if (diffSec < 60) return `${diffSec} 秒前`;
+  if (diffSec < 3600) return `${Math.floor(diffSec / 60)} 分钟前`;
+  if (diffSec < 86400) return `${Math.floor(diffSec / 3600)} 小时前`;
+  return new Date(ts).toLocaleString();
+}
+
 export function SearchPage() {
   const { config } = useConfigStore();
   const { startCacheTasks } = useTaskStore();
 
+  const {
+    cachedAll,
+    cachedSource,
+    cachedError,
+    loading: cacheLoading,
+    lastLoadedAt,
+    loadCachedPackages: loadCachedFromStore,
+  } = useCacheStore();
+
   const [query, setQuery] = useState("");
   const [source, setSource] = useState<RegistrySource>("npmjs");
   const [results, setResults] = useState<SearchResult[]>([]);
-  const [cachedAll, setCachedAll] = useState<SearchResult[]>([]);
-  const [cachedSource, setCachedSource] = useState<
-    "plugin" | "storage" | "none"
-  >("none");
-  const [cachedError, setCachedError] = useState<string | null>(null);
   const [searching, setSearching] = useState(false);
   const [expanded, setExpanded] = useState<Record<string, ExpandedPackage>>({});
   const [selected, setSelected] = useState<Map<string, Set<string>>>(
@@ -57,51 +65,12 @@ export function SearchPage() {
   const registryUrl =
     source === "npmjs" ? "https://registry.npmjs.org" : config.registry_url;
 
-  const loadCachedPackages = useCallback(async () => {
-    setSearching(true);
-    setCachedError(null);
-    try {
-      try {
-        const viaPlugin = await invoke<SearchResult[]>(
-          "list_cached_via_plugin",
-          { registryUrl: config.registry_url }
-        );
-        setCachedAll(viaPlugin);
-        setCachedSource("plugin");
-        return;
-      } catch (e) {
-        const msg = String(e);
-        if (!msg.includes("PLUGIN_NOT_INSTALLED")) {
-          console.warn("plugin endpoint 错误:", e);
-        }
-      }
-
-      if (config.verdaccio_storage_path) {
-        try {
-          const res = await invoke<SearchResult[]>("scan_verdaccio_storage", {
-            storagePath: config.verdaccio_storage_path,
-          });
-          setCachedAll(res);
-          setCachedSource("storage");
-          return;
-        } catch (e) {
-          setCachedError(`扫描 storage 失败: ${e}`);
-        }
-      } else {
-        setCachedError(
-          "未安装 verdaccio-plugin-cached-list 插件，且未配置 storage 路径（设置页中可填）"
-        );
-      }
-      setCachedAll([]);
-      setCachedSource("none");
-    } finally {
-      setSearching(false);
-    }
-  }, [config.registry_url, config.verdaccio_storage_path]);
-
-  useEffect(() => {
-    loadCachedPackages();
-  }, [loadCachedPackages]);
+  const refreshCached = useCallback(() => {
+    return loadCachedFromStore(
+      config.registry_url,
+      config.verdaccio_storage_path
+    );
+  }, [config.registry_url, config.verdaccio_storage_path, loadCachedFromStore]);
 
   useEffect(() => {
     if (source === "npmjs") setResults([]);
@@ -121,10 +90,7 @@ export function SearchPage() {
   const displayResults = source === "verdaccio" ? filteredCached : results;
 
   const handleSearch = useCallback(async () => {
-    if (source === "verdaccio") {
-      await loadCachedPackages();
-      return;
-    }
+    if (source === "verdaccio") return;
     if (!query.trim()) return;
     setSearching(true);
     setResults([]);
@@ -139,7 +105,7 @@ export function SearchPage() {
     } finally {
       setSearching(false);
     }
-  }, [query, registryUrl, source, loadCachedPackages]);
+  }, [query, registryUrl, source]);
 
   const cachedVersionsByName = useMemo(() => {
     const map = new Map<string, Set<string>>();
@@ -282,15 +248,30 @@ export function SearchPage() {
             />
           </div>
 
-          <Button onClick={handleSearch} disabled={searching}>
-            {searching ? (
-              <Loader2 className="h-4 w-4 animate-spin" />
-            ) : source === "verdaccio" ? (
-              "刷新"
-            ) : (
-              "搜索"
-            )}
-          </Button>
+          {source === "verdaccio" ? (
+            <Button
+              onClick={() => refreshCached()}
+              disabled={cacheLoading}
+              variant="outline"
+            >
+              {cacheLoading ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : (
+                <>
+                  <RefreshCw className="mr-2 h-4 w-4" />
+                  刷新已缓存
+                </>
+              )}
+            </Button>
+          ) : (
+            <Button onClick={handleSearch} disabled={searching}>
+              {searching ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : (
+                "搜索"
+              )}
+            </Button>
+          )}
         </div>
 
         <div className="flex items-center justify-between">
@@ -302,13 +283,16 @@ export function SearchPage() {
             <span>仅显示正式版本</span>
           </label>
 
-          {source === "verdaccio" && cachedSource !== "none" && (
+          {lastLoadedAt && (
             <span className="text-xs text-muted-foreground">
-              来源：
+              已缓存来源：
               {cachedSource === "plugin"
                 ? "verdaccio 插件接口"
-                : "storage 目录扫描"}
-              · 共 {cachedAll.length} 个包
+                : cachedSource === "storage"
+                ? "storage 目录扫描"
+                : "无"}
+              · {cachedAll.length} 个包 · 更新于{" "}
+              {formatRelativeTime(lastLoadedAt)}
             </span>
           )}
         </div>
@@ -410,10 +394,21 @@ export function SearchPage() {
             </div>
           ))}
 
-          {!searching && displayResults.length === 0 && (
+          {!searching && !cacheLoading && displayResults.length === 0 && (
             <div className="py-8 text-center text-muted-foreground">
               {source === "verdaccio" ? (
-                cachedError ? (
+                lastLoadedAt === null ? (
+                  <div className="space-y-3">
+                    <p className="text-sm">点击「刷新已缓存」加载列表</p>
+                    <Button
+                      variant="outline"
+                      onClick={() => refreshCached()}
+                    >
+                      <RefreshCw className="mr-2 h-4 w-4" />
+                      刷新已缓存
+                    </Button>
+                  </div>
+                ) : cachedError ? (
                   <p className="text-sm">{cachedError}</p>
                 ) : cachedAll.length === 0 ? (
                   <p>Verdaccio 暂无已缓存的包</p>
@@ -429,7 +424,7 @@ export function SearchPage() {
       </ScrollArea>
 
       {totalSelected > 0 && (
-        <div className="mt-4 flex items-center justify-between rounded-lg border bg-muted/30 p-3">
+        <div className="-mx-6 -mb-6 mt-4 flex items-center justify-between border-t bg-background px-6 py-3">
           <span className="text-sm">
             已选择 <strong>{totalSelected}</strong> 个版本
           </span>

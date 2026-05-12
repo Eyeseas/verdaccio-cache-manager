@@ -1,12 +1,23 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useTaskStore } from "@/stores/taskStore";
+import { useTauriFileDrop } from "@/hooks/useTauriFileDrop";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Badge } from "@/components/ui/badge";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { FileInput, Loader2, FolderOpen } from "lucide-react";
+
+const SUPPORTED_FILES = [
+  "package.json",
+  "pnpm-lock.yaml",
+  "package-lock.json",
+];
+const isDependencyFile = (path: string) => {
+  const name = path.replace(/\\/g, "/").split("/").pop() ?? path;
+  return SUPPORTED_FILES.includes(name);
+};
 
 interface ParsedDependency {
   name: string;
@@ -26,6 +37,7 @@ export function ImportPage() {
   const [fileName, setFileName] = useState<string | null>(null);
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [error, setError] = useState<string | null>(null);
+  const dropZoneRef = useRef<HTMLDivElement>(null);
 
   const handleSelectFile = async () => {
     const file = await open({
@@ -118,22 +130,25 @@ export function ImportPage() {
 
   const uncachedCount = deps.filter((d) => !d.cached).length;
 
+  const { isOver: dropIsOver } = useTauriFileDrop({
+    zoneRef: dropZoneRef,
+    enabled: deps.length === 0 && !loading,
+    filter: isDependencyFile,
+    onDrop: async (paths) => {
+      if (paths[0]) await parseFile(paths[0]);
+    },
+  });
+
   return (
     <div className="flex h-full flex-col p-6">
       <h1 className="mb-4 text-2xl font-bold">导入</h1>
 
       {deps.length === 0 && !loading && (
         <div
-          className="flex flex-1 flex-col items-center justify-center rounded-lg border-2 border-dashed p-12 text-center"
-          onDragOver={(e) => e.preventDefault()}
-          onDrop={async (e) => {
-            e.preventDefault();
-            const file = e.dataTransfer.files[0];
-            if (file) {
-              const path = (file as unknown as { path: string }).path;
-              if (path) await parseFile(path);
-            }
-          }}
+          ref={dropZoneRef}
+          className={`flex flex-1 flex-col items-center justify-center rounded-lg border-2 border-dashed p-12 text-center transition-colors ${
+            dropIsOver ? "border-primary bg-primary/5" : ""
+          }`}
         >
           <FileInput className="mb-4 h-12 w-12 text-muted-foreground" />
           <p className="mb-2 text-lg font-medium">
@@ -218,7 +233,7 @@ export function ImportPage() {
           </ScrollArea>
 
           {selected.size > 0 && (
-            <div className="mt-4 flex items-center justify-between rounded-lg border bg-muted/30 p-3">
+            <div className="-mx-6 -mb-6 mt-4 flex items-center justify-between border-t bg-background px-6 py-3">
               <span className="text-sm">
                 已选择 <strong>{selected.size}</strong> 个包
               </span>

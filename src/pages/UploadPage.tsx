@@ -1,13 +1,16 @@
-import { useState } from "react";
+import { useState, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useTaskStore } from "@/stores/taskStore";
+import { useTauriFileDrop } from "@/hooks/useTauriFileDrop";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Badge } from "@/components/ui/badge";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { FolderOpen, Upload, Loader2, Package } from "lucide-react";
+
+const isTgzFile = (path: string) => path.toLowerCase().endsWith(".tgz");
 
 interface LocalPackage {
   name: string;
@@ -188,6 +191,7 @@ function TgzTab() {
   const { startCacheTasks } = useTaskStore();
   const [files, setFiles] = useState<LocalPackage[]>([]);
   const [loading, setLoading] = useState(false);
+  const dropZoneRef = useRef<HTMLDivElement>(null);
 
   const handleSelectFiles = async () => {
     const selected = await open({
@@ -226,6 +230,15 @@ function TgzTab() {
     setFiles([]);
   };
 
+  const { isOver } = useTauriFileDrop({
+    zoneRef: dropZoneRef,
+    enabled: files.length === 0 && !loading,
+    filter: isTgzFile,
+    onDrop: async (paths) => {
+      if (paths.length > 0) await parseTgzFiles(paths);
+    },
+  });
+
   if (loading) {
     return (
       <div className="flex flex-1 items-center justify-center">
@@ -238,17 +251,10 @@ function TgzTab() {
   if (files.length === 0) {
     return (
       <div
-        className="flex flex-1 flex-col items-center justify-center rounded-lg border-2 border-dashed p-12"
-        onDragOver={(e) => e.preventDefault()}
-        onDrop={async (e) => {
-          e.preventDefault();
-          const paths: string[] = [];
-          for (const file of Array.from(e.dataTransfer.files)) {
-            const path = (file as unknown as { path: string }).path;
-            if (path && path.endsWith(".tgz")) paths.push(path);
-          }
-          if (paths.length > 0) await parseTgzFiles(paths);
-        }}
+        ref={dropZoneRef}
+        className={`flex flex-1 flex-col items-center justify-center rounded-lg border-2 border-dashed p-12 transition-colors ${
+          isOver ? "border-primary bg-primary/5" : ""
+        }`}
       >
         <Upload className="mb-4 h-12 w-12 text-muted-foreground" />
         <p className="mb-2 text-lg font-medium">拖入 .tgz 文件</p>
