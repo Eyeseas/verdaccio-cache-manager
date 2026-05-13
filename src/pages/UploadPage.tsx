@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
@@ -305,11 +305,70 @@ function ScanTab() {
   );
 }
 
+type UploadStatus = "idle" | "Pending" | "Downloading" | "Uploading" | "Success" | "Failed" | "Skipped";
+
+interface TgzFileWithStatus extends LocalPackage {
+  uploadStatus: UploadStatus;
+  error?: string;
+}
+
+function statusBadge(status: UploadStatus, error?: string) {
+  switch (status) {
+    case "Pending":
+      return <Badge variant="secondary">等待中</Badge>;
+    case "Downloading":
+      return (
+        <Badge variant="secondary" className="animate-pulse">
+          下载中
+        </Badge>
+      );
+    case "Uploading":
+      return (
+        <Badge variant="secondary" className="animate-pulse">
+          上传中
+        </Badge>
+      );
+    case "Success":
+      return (
+        <Badge variant="outline" className="border-green-300 text-green-600">
+          成功
+        </Badge>
+      );
+    case "Skipped":
+      return (
+        <Badge variant="outline" className="border-yellow-300 text-yellow-600">
+          已存在
+        </Badge>
+      );
+    case "Failed":
+      return (
+        <Badge variant="outline" className="border-red-300 text-red-600" title={error}>
+          失败
+        </Badge>
+      );
+    default:
+      return null;
+  }
+}
+
 function TgzTab() {
   const { startCacheTasks } = useTaskStore();
-  const [files, setFiles] = useState<LocalPackage[]>([]);
+  const [files, setFiles] = useState<TgzFileWithStatus[]>([]);
   const [loading, setLoading] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const unlistenRef = useRef<(() => void) | null>(null);
   const dropZoneRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!uploading) return;
+    const terminal = ["Success", "Failed", "Skipped"];
+    const allDone = files.length > 0 && files.every((f) => terminal.includes(f.uploadStatus));
+    if (allDone) {
+      unlistenRef.current?.();
+      unlistenRef.current = null;
+      setUploading(false);
+    }
+  }, [files, uploading]);
 
   const handleSelectFiles = async () => {
     const selected = await open({
@@ -325,10 +384,10 @@ function TgzTab() {
   const parseTgzFiles = async (paths: string[]) => {
     setLoading(true);
     try {
-      const parsed: LocalPackage[] = [];
+      const parsed: TgzFileWithStatus[] = [];
       for (const p of paths) {
         const pkg = await invoke<LocalPackage>("parse_tgz", { filePath: p });
-        parsed.push(pkg);
+        parsed.push({ ...pkg, uploadStatus: "idle" });
       }
       setFiles(parsed);
     } catch (e) {
@@ -339,13 +398,36 @@ function TgzTab() {
   };
 
   const handleUpload = async () => {
+    setUploading(true);
+    setFiles((prev) =>
+      prev.map((f) => ({ ...f, uploadStatus: "Pending" as UploadStatus }))
+    );
+
     const packages = files.map((f) => ({
       package_name: f.name,
       version: f.version,
       tarball_url: `file://${f.path}`,
     }));
+
+    const unlisten = await listen<{
+      id: string;
+      package_name: string;
+      version: string;
+      status: UploadStatus;
+      error: string | null;
+    }>("task-progress", (event) => {
+      const { package_name, version, status, error } = event.payload;
+      setFiles((prev) =>
+        prev.map((f) =>
+          f.name === package_name && f.version === version
+            ? { ...f, uploadStatus: status, error: error ?? undefined }
+            : f
+        )
+      );
+    });
+
+    unlistenRef.current = unlisten;
     await startCacheTasks(packages);
-    setFiles([]);
   };
 
   const { isOver } = useTauriFileDrop({
@@ -356,6 +438,11 @@ function TgzTab() {
       if (paths.length > 0) await parseTgzFiles(paths);
     },
   });
+
+  const handleReset = () => {
+    setFiles([]);
+    setUploading(false);
+  };
 
   if (loading) {
     return (
@@ -387,15 +474,23 @@ function TgzTab() {
     );
   }
 
+  const doneCount = files.filter(
+    (f) => f.uploadStatus === "Success" || f.uploadStatus === "Skipped"
+  ).length;
+  const allDone = uploading && doneCount === files.length;
+
   return (
     <div className="flex min-h-0 flex-1 flex-col pt-3">
       <div className="mb-3 flex items-center justify-between">
         <span className="text-sm text-muted-foreground">
           已解析 {files.length} 个 tarball
+          {uploading && ` · 已完成 ${doneCount}/${files.length}`}
         </span>
-        <Button variant="outline" size="sm" onClick={handleSelectFiles}>
-          添加更多
-        </Button>
+        {!uploading && (
+          <Button variant="outline" size="sm" onClick={handleSelectFiles}>
+            添加更多
+          </Button>
+        )}
       </div>
 
       <ScrollArea className="min-h-0 flex-1 rounded-md border">
@@ -410,6 +505,7 @@ function TgzTab() {
                 {f.name}
               </span>
               <span className="text-sm text-muted-foreground">{f.version}</span>
+              {statusBadge(f.uploadStatus, f.error)}
             </div>
           ))}
         </div>
@@ -419,7 +515,23 @@ function TgzTab() {
         <span className="text-sm">
           共 <strong>{files.length}</strong> 个包
         </span>
-        <Button onClick={handleUpload}>上传到私服</Button>
+        <div className="flex gap-2">
+          {allDone && (
+            <Button variant="outline" onClick={handleReset}>
+              重新选择
+            </Button>
+          )}
+          <Button onClick={handleUpload} disabled={uploading}>
+            {uploading ? (
+              <>
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                上传中...
+              </>
+            ) : (
+              "上传到私服"
+            )}
+          </Button>
+        </div>
       </div>
     </div>
   );

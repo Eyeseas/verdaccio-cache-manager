@@ -365,20 +365,23 @@ async fn update_task_status(
     error: Option<String>,
     app: &AppHandle,
 ) {
-    {
+    let (package_name, version) = {
         let mut tasks = tasks.lock().await;
         if let Some(task) = tasks.iter_mut().find(|t| t.id == task_id) {
             task.status = status;
             task.error = error.clone();
+            (task.package_name.clone(), task.version.clone())
+        } else {
+            (String::new(), String::new())
         }
-    }
+    };
 
     let _ = app.emit(
         "task-progress",
         TaskProgressEvent {
             id: task_id.to_string(),
-            package_name: String::new(),
-            version: String::new(),
+            package_name,
+            version,
             status,
             error,
         },
