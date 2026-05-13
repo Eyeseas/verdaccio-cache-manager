@@ -26,15 +26,15 @@ export function UploadPage() {
   return (
     <div className="flex h-full flex-col p-6">
       <h1 className="mb-4 text-2xl font-bold">本地上传</h1>
-      <Tabs defaultValue="scan" className="flex flex-1 flex-col">
+      <Tabs defaultValue="scan" className="flex min-h-0 flex-1 flex-col">
         <TabsList className="w-fit">
           <TabsTrigger value="scan">扫描 node_modules</TabsTrigger>
           <TabsTrigger value="tgz">上传 .tgz</TabsTrigger>
         </TabsList>
-        <TabsContent value="scan" className="flex-1">
+        <TabsContent value="scan" className="flex min-h-0 flex-1 flex-col">
           <ScanTab />
         </TabsContent>
-        <TabsContent value="tgz" className="flex-1">
+        <TabsContent value="tgz" className="flex min-h-0 flex-1 flex-col">
           <TgzTab />
         </TabsContent>
       </Tabs>
@@ -49,6 +49,7 @@ function ScanTab() {
   const [loading, setLoading] = useState(false);
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [dirPath, setDirPath] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
   const handleSelectDir = async () => {
     const dir = await open({ directory: true });
@@ -58,11 +59,17 @@ function ScanTab() {
     setPackages([]);
     setSelected(new Set());
     setDirPath(dir);
+    setError(null);
 
     try {
       const scanned = await invoke<LocalPackage[]>("scan_node_modules", {
         dirPath: dir,
       });
+
+      if (scanned.length === 0) {
+        setError("未在该目录下发现任何包，请确认已安装依赖");
+        return;
+      }
 
       const withStatus: PackageWithStatus[] = scanned.map((pkg) => ({
         ...pkg,
@@ -74,6 +81,7 @@ function ScanTab() {
       setSelected(allIndices);
     } catch (e) {
       console.error("扫描失败:", e);
+      setError(`扫描失败: ${e}`);
     } finally {
       setLoading(false);
     }
@@ -87,6 +95,16 @@ function ScanTab() {
       return next;
     });
   };
+
+  const selectAllUncached = () => {
+    const uncached = new Set<number>();
+    packages.forEach((p, i) => {
+      if (!p.cached) uncached.add(i);
+    });
+    setSelected(uncached);
+  };
+
+  const deselectAll = () => setSelected(new Set());
 
   const handleUpload = async () => {
     const pkgs = Array.from(selected).map((i) => ({
@@ -111,12 +129,15 @@ function ScanTab() {
 
   if (packages.length === 0) {
     return (
-      <div className="flex flex-1 flex-col items-center justify-center rounded-lg border-2 border-dashed p-12">
+      <div className="flex flex-1 flex-col items-center justify-center rounded-lg border-2 border-dashed p-12 text-center">
         <Package className="mb-4 h-12 w-12 text-muted-foreground" />
         <p className="mb-2 text-lg font-medium">选择项目目录</p>
         <p className="mb-4 text-sm text-muted-foreground">
           扫描 node_modules 中的包并上传到 Verdaccio
         </p>
+        {error && (
+          <p className="mb-4 max-w-md text-sm text-destructive">{error}</p>
+        )}
         <Button variant="outline" onClick={handleSelectDir}>
           <FolderOpen className="mr-2 h-4 w-4" />
           选择目录
@@ -126,17 +147,27 @@ function ScanTab() {
   }
 
   return (
-    <div className="flex flex-1 flex-col pt-3">
-      <div className="mb-3 flex items-center justify-between">
-        <div className="flex items-center gap-3">
-          <Badge variant="outline">{dirPath}</Badge>
-          <span className="text-sm text-muted-foreground">
+    <div className="flex min-h-0 flex-1 flex-col pt-3">
+      <div className="mb-3 flex items-center justify-between gap-3">
+        <div className="flex min-w-0 items-center gap-3">
+          <Badge variant="outline" className="max-w-[24rem] truncate">
+            {dirPath}
+          </Badge>
+          <span className="shrink-0 text-sm text-muted-foreground">
             共 {packages.length} 个包，{uncachedCount} 个未缓存
           </span>
         </div>
-        <Button variant="outline" size="sm" onClick={handleSelectDir}>
-          重新扫描
-        </Button>
+        <div className="flex shrink-0 gap-2">
+          <Button variant="ghost" size="sm" onClick={selectAllUncached}>
+            全选未缓存
+          </Button>
+          <Button variant="ghost" size="sm" onClick={deselectAll}>
+            取消全选
+          </Button>
+          <Button variant="outline" size="sm" onClick={handleSelectDir}>
+            重新扫描
+          </Button>
+        </div>
       </div>
 
       <ScrollArea className="min-h-0 flex-1 rounded-md border">
@@ -270,7 +301,7 @@ function TgzTab() {
   }
 
   return (
-    <div className="flex flex-1 flex-col pt-3">
+    <div className="flex min-h-0 flex-1 flex-col pt-3">
       <div className="mb-3 flex items-center justify-between">
         <span className="text-sm text-muted-foreground">
           已解析 {files.length} 个 tarball

@@ -9,9 +9,17 @@ pub struct LocalPackage {
 }
 
 pub fn scan_node_modules(project_dir: &Path) -> Result<Vec<LocalPackage>, String> {
-    let node_modules = project_dir.join("node_modules");
+    let node_modules = if project_dir.file_name().and_then(|s| s.to_str()) == Some("node_modules") {
+        project_dir.to_path_buf()
+    } else {
+        project_dir.join("node_modules")
+    };
+
     if !node_modules.exists() {
-        return Err("node_modules 目录不存在".to_string());
+        return Err(format!(
+            "未找到 node_modules 目录（已检查 {}）",
+            node_modules.display()
+        ));
     }
 
     let mut packages = Vec::new();
