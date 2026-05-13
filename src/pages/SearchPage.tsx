@@ -298,7 +298,7 @@ export function SearchPage() {
         </div>
       </div>
 
-      <ScrollArea className="flex-1">
+      <ScrollArea className="min-h-0 flex-1">
         <div className="space-y-1">
           {displayResults.map((pkg) => (
             <div key={pkg.name} className="rounded-lg border">

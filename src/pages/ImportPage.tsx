@@ -196,7 +196,7 @@ export function ImportPage() {
             </div>
           </div>
 
-          <ScrollArea className="flex-1 rounded-md border">
+          <ScrollArea className="min-h-0 flex-1 rounded-md border">
             <div className="divide-y">
               {deps.map((dep, i) => (
                 <div

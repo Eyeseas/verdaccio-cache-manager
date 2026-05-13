@@ -139,7 +139,7 @@ function ScanTab() {
         </Button>
       </div>
 
-      <ScrollArea className="flex-1 rounded-md border">
+      <ScrollArea className="min-h-0 flex-1 rounded-md border">
         <div className="divide-y">
           {packages.map((pkg, i) => (
             <div
@@ -280,7 +280,7 @@ function TgzTab() {
         </Button>
       </div>
 
-      <ScrollArea className="flex-1 rounded-md border">
+      <ScrollArea className="min-h-0 flex-1 rounded-md border">
         <div className="divide-y">
           {files.map((f) => (
             <div
