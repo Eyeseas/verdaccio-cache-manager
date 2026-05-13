@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useConfigStore } from "@/stores/configStore";
+import { useSyncStore } from "@/stores/syncStore";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -11,10 +12,11 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
-import { FolderOpen } from "lucide-react";
+import { FolderOpen, RefreshCw, Trash2 } from "lucide-react";
 
 export function SettingsPage() {
   const { config, loadConfig, saveConfig, testConnection } = useConfigStore();
+  const { status: syncStatus, lastSyncAt, startSync, clearIndex } = useSyncStore();
   const [form, setForm] = useState(config);
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<string | null>(null);
@@ -158,6 +160,40 @@ export function SettingsPage() {
               用于在「搜索 → Verdaccio」中列出已缓存包（含 proxy
               缓存）。可填本地路径或通过 SMB/NFS/sshfs 挂载的远程目录。若 Verdaccio
               安装了 verdaccio-cached-list 插件则可不填。
+            </p>
+          </div>
+
+          <div className="space-y-2 border-t pt-4">
+            <Label>缓存索引同步</Label>
+            <div className="flex items-center gap-3">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={startSync}
+                disabled={syncStatus === "syncing"}
+              >
+                <RefreshCw
+                  className={`mr-1.5 h-3.5 w-3.5 ${syncStatus === "syncing" ? "animate-spin" : ""}`}
+                />
+                {syncStatus === "syncing" ? "同步中..." : "手动同步"}
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={clearIndex}
+                disabled={syncStatus === "syncing"}
+              >
+                <Trash2 className="mr-1.5 h-3.5 w-3.5" />
+                清除索引
+              </Button>
+              {lastSyncAt && (
+                <span className="text-xs text-muted-foreground">
+                  上次同步: {new Date(lastSyncAt).toLocaleString()}
+                </span>
+              )}
+            </div>
+            <p className="text-xs text-muted-foreground">
+              保存配置时若 Registry 地址变更会自动同步。手动同步为增量更新；清除索引后再同步将全量重建。
             </p>
           </div>
 

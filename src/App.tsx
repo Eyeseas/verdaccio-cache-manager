@@ -4,6 +4,7 @@ import { SearchPage } from "./pages/SearchPage";
 import { ImportPage } from "./pages/ImportPage";
 import { UploadPage } from "./pages/UploadPage";
 import { SettingsPage } from "./pages/SettingsPage";
+import { Toaster } from "./components/ui/sonner";
 
 export default function App() {
   return (
@@ -16,6 +17,7 @@ export default function App() {
           <Route path="/settings" element={<SettingsPage />} />
         </Route>
       </Routes>
+      <Toaster position="bottom-right" />
     </BrowserRouter>
   );
 }

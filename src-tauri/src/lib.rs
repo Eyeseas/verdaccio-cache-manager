@@ -1,11 +1,14 @@
+pub mod cache_db;
 pub mod config;
 pub mod dependency_resolver;
 pub mod local_scanner;
 pub mod parser;
 pub mod registry_client;
 pub mod storage_scanner;
+pub mod sync_engine;
 pub mod task_engine;
 
+use cache_db::{CacheDb, CachedStatus, SyncInfo};
 use config::AppConfig;
 use dependency_resolver::ResolvedDep;
 use local_scanner::LocalPackage;
@@ -14,11 +17,15 @@ use registry_client::SearchResult;
 use serde::Deserialize;
 use std::path::PathBuf;
 use std::sync::Arc;
+use sync_engine::SyncEngine;
+use tauri::Manager;
 use task_engine::{CacheTask, TaskEngine, TaskStatus};
 use tokio::sync::Mutex;
 
 struct AppState {
     task_engine: Arc<Mutex<Option<TaskEngine>>>,
+    cache_db: Arc<Mutex<CacheDb>>,
+    sync_engine: Arc<SyncEngine>,
 }
 
 #[tauri::command]
@@ -27,8 +34,31 @@ fn get_config(app_handle: tauri::AppHandle) -> AppConfig {
 }
 
 #[tauri::command]
-fn save_config(app_handle: tauri::AppHandle, config: AppConfig) -> Result<(), String> {
-    config::save_config(&app_handle, &config)
+fn save_config(
+    app_handle: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    config: AppConfig,
+) -> Result<(), String> {
+    let old_config = config::load_config(&app_handle);
+    config::save_config(&app_handle, &config)?;
+
+    if old_config.registry_url != config.registry_url && !config.registry_url.is_empty() {
+        let db = state.cache_db.clone();
+        let sync = state.sync_engine.clone();
+        let app = app_handle.clone();
+        let registry_url = config.registry_url.clone();
+        let storage_path = config.verdaccio_storage_path.clone();
+        tauri::async_runtime::spawn(async move {
+            if !sync.is_running() {
+                let db_lock = db.lock().await;
+                let _ = db_lock.clear_all();
+                drop(db_lock);
+                sync.start_sync(app, registry_url, storage_path, db).await;
+            }
+        });
+    }
+
+    Ok(())
 }
 
 #[tauri::command]
@@ -287,13 +317,118 @@ async fn upload_tgz_files(
     Ok(())
 }
 
+#[tauri::command]
+async fn check_cached_status(
+    state: tauri::State<'_, AppState>,
+    packages: Vec<(String, String)>,
+) -> Result<Vec<CachedStatus>, String> {
+    let db = state.cache_db.lock().await;
+    db.check_cached(&packages)
+}
+
+#[tauri::command]
+async fn get_all_cached_packages(
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<SearchResult>, String> {
+    let db = state.cache_db.lock().await;
+    db.get_all_packages()
+}
+
+#[tauri::command]
+async fn start_cache_sync(
+    app_handle: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    let config = config::load_config(&app_handle);
+    let db = state.cache_db.clone();
+    let sync = state.sync_engine.clone();
+
+    if sync.is_running() {
+        return Err("同步正在进行中".into());
+    }
+
+    let app = app_handle.clone();
+    tokio::spawn(async move {
+        sync.start_sync(
+            app,
+            config.registry_url,
+            config.verdaccio_storage_path,
+            db,
+        )
+        .await;
+    });
+
+    Ok(())
+}
+
+#[tauri::command]
+async fn get_sync_info(
+    state: tauri::State<'_, AppState>,
+) -> Result<SyncInfo, String> {
+    let db = state.cache_db.lock().await;
+    let last_registry_url = db.get_meta("last_registry_url")?;
+    let last_sync_at = db.get_meta("last_sync_at")?;
+    let is_running = state.sync_engine.is_running();
+    Ok(SyncInfo {
+        last_registry_url,
+        last_sync_at,
+        is_running,
+    })
+}
+
+#[tauri::command]
+async fn clear_cache_index(
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    let db = state.cache_db.lock().await;
+    db.clear_all()
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
-        .manage(AppState {
-            task_engine: Arc::new(Mutex::new(None)),
+        .setup(|app| {
+            let db = CacheDb::open(&app.handle())
+                .expect("无法打开缓存数据库");
+            let cache_db = Arc::new(Mutex::new(db));
+            let sync_engine = Arc::new(SyncEngine::new());
+
+            app.manage(AppState {
+                task_engine: Arc::new(Mutex::new(None)),
+                cache_db: cache_db.clone(),
+                sync_engine: sync_engine.clone(),
+            });
+
+            // Auto-sync if registry_url changed since last sync
+            let config = config::load_config(&app.handle());
+            let app_handle = app.handle().clone();
+            let db_ref = cache_db.clone();
+            let sync_ref = sync_engine.clone();
+            tauri::async_runtime::spawn(async move {
+                let should_sync = {
+                    let db = db_ref.lock().await;
+                    let last_url = db.get_meta("last_registry_url").unwrap_or(None);
+                    last_url.as_deref() != Some(&config.registry_url)
+                };
+                if should_sync && !config.registry_url.is_empty() {
+                    {
+                        let db = db_ref.lock().await;
+                        let _ = db.clear_all();
+                    }
+                    sync_ref
+                        .start_sync(
+                            app_handle,
+                            config.registry_url,
+                            config.verdaccio_storage_path,
+                            db_ref,
+                        )
+                        .await;
+                }
+            });
+
+            Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             get_config,
@@ -313,6 +448,11 @@ pub fn run() {
             scan_node_modules,
             parse_tgz,
             upload_tgz_files,
+            check_cached_status,
+            get_all_cached_packages,
+            start_cache_sync,
+            get_sync_info,
+            clear_cache_index,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

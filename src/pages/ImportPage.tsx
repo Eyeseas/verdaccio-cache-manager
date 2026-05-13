@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef } from "react";
+import { useState, useCallback, useRef, useEffect, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useVirtualizer } from "@tanstack/react-virtual";
@@ -25,14 +25,24 @@ interface ParsedDependency {
   tarball_url: string | null;
 }
 
-interface DependencyWithStatus extends ParsedDependency {
+interface CachedStatus {
+  name: string;
+  version: string;
   cached: boolean;
+}
+
+interface DependencyWithStatus extends ParsedDependency {
+  cached: boolean | undefined;
 }
 
 export function ImportPage() {
   const { startCacheTasks, resolveDependencies } = useTaskStore();
 
-  const [deps, setDeps] = useState<DependencyWithStatus[]>([]);
+  const [parsedDeps, setParsedDeps] = useState<ParsedDependency[]>([]);
+  const [cachedMap, setCachedMap] = useState<Map<string, Set<string>>>(
+    new Map()
+  );
+  const [checking, setChecking] = useState(false);
   const [loading, setLoading] = useState(false);
   const [fileName, setFileName] = useState<string | null>(null);
   const [selected, setSelected] = useState<Set<number>>(new Set());
@@ -41,12 +51,45 @@ export function ImportPage() {
   const dropZoneRef = useRef<HTMLDivElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
 
+  const deps: DependencyWithStatus[] = useMemo(
+    () =>
+      parsedDeps.map((dep) => ({
+        ...dep,
+        cached: checking
+          ? undefined
+          : (cachedMap.get(dep.name)?.has(dep.version) ?? false),
+      })),
+    [parsedDeps, cachedMap, checking]
+  );
+
   const rowVirtualizer = useVirtualizer({
     count: deps.length,
     getScrollElement: () => listRef.current,
     estimateSize: () => 37,
     overscan: 12,
   });
+
+  const checkCachedStatus = useCallback(async (parsed: ParsedDependency[]) => {
+    setChecking(true);
+    try {
+      const pairs: [string, string][] = parsed.map((d) => [d.name, d.version]);
+      const results = await invoke<CachedStatus[]>("check_cached_status", {
+        packages: pairs,
+      });
+      const map = new Map<string, Set<string>>();
+      for (const r of results) {
+        if (r.cached) {
+          if (!map.has(r.name)) map.set(r.name, new Set());
+          map.get(r.name)!.add(r.version);
+        }
+      }
+      setCachedMap(map);
+    } catch (_) {
+      setCachedMap(new Map());
+    } finally {
+      setChecking(false);
+    }
+  }, []);
 
   const handleSelectFile = async () => {
     const file = await open({
@@ -65,8 +108,9 @@ export function ImportPage() {
   const parseFile = useCallback(
     async (filePath: string) => {
       setLoading(true);
-      setDeps([]);
+      setParsedDeps([]);
       setSelected(new Set());
+      setCachedMap(new Map());
       setError(null);
       setFileName(filePath.split("/").pop() || filePath);
 
@@ -81,28 +125,25 @@ export function ImportPage() {
           return;
         }
 
-        // Don't check Verdaccio for cached status — Verdaccio proxies upstream
-        // and would report all npmjs versions as "available". Instead, show all
-        // deps as uncached and let the task engine handle 409 conflicts (→ Skipped).
-        const withStatus: DependencyWithStatus[] = parsed.map((dep) => ({
-          ...dep,
-          cached: false,
-        }));
-
-        setDeps(withStatus);
-
-        const allIndices = new Set<number>(
-          withStatus.map((_, i) => i)
-        );
-        setSelected(allIndices);
+        setParsedDeps(parsed);
+        checkCachedStatus(parsed);
       } catch (e) {
         setError(`解析失败: ${e}`);
       } finally {
         setLoading(false);
       }
     },
-    []
+    [checkCachedStatus]
   );
+
+  useEffect(() => {
+    if (deps.length === 0 || checking) return;
+    const uncached = new Set<number>();
+    deps.forEach((d, i) => {
+      if (!d.cached) uncached.add(i);
+    });
+    setSelected(uncached);
+  }, [deps, checking]);
 
   const toggleSelect = (index: number) => {
     setSelected((prev) => {
@@ -157,7 +198,7 @@ export function ImportPage() {
     }
   };
 
-  const uncachedCount = deps.filter((d) => !d.cached).length;
+  const uncachedCount = deps.filter((d) => d.cached === false).length;
 
   const { isOver: dropIsOver } = useTauriFileDrop({
     zoneRef: dropZoneRef,
@@ -252,7 +293,7 @@ export function ImportPage() {
                     }}
                     className="flex items-center gap-3 border-b px-4 py-2"
                   >
-                    {!dep.cached ? (
+                    {!dep.cached && dep.cached !== undefined ? (
                       <Checkbox
                         checked={selected.has(i)}
                         onCheckedChange={() => toggleSelect(i)}
@@ -266,7 +307,11 @@ export function ImportPage() {
                     <span className="text-sm text-muted-foreground">
                       {dep.version}
                     </span>
-                    {dep.cached ? (
+                    {dep.cached === undefined ? (
+                      <Badge variant="secondary" className="animate-pulse">
+                        检查中
+                      </Badge>
+                    ) : dep.cached ? (
                       <Badge
                         variant="outline"
                         className="border-green-300 text-green-600"

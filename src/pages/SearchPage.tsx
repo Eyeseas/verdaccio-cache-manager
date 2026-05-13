@@ -21,7 +21,6 @@ import {
   ChevronDown,
   ChevronRight,
   Check,
-  RefreshCw,
 } from "lucide-react";
 
 type SearchResult = CachedPackage;
@@ -53,13 +52,11 @@ export function SearchPage() {
 
   const {
     cachedAll,
-    cachedSource,
     cachedError,
     loading: cacheLoading,
     lastLoadedAt,
     loadCachedPackages: loadCachedFromStore,
   } = useCacheStore();
-
   const [query, setQuery] = useState("");
   const [source, setSource] = useState<RegistrySource>("npmjs");
   const [results, setResults] = useState<SearchResult[]>([]);
@@ -74,17 +71,11 @@ export function SearchPage() {
   const registryUrl =
     source === "npmjs" ? "https://registry.npmjs.org" : config.registry_url;
 
-  const refreshCached = useCallback(() => {
-    return loadCachedFromStore(
-      config.registry_url,
-      config.verdaccio_storage_path
-    );
-  }, [config.registry_url, config.verdaccio_storage_path, loadCachedFromStore]);
-
   useEffect(() => {
     if (source === "npmjs") setResults([]);
+    if (source === "verdaccio") loadCachedFromStore();
     setExpanded({});
-  }, [source]);
+  }, [source, loadCachedFromStore]);
 
   const filteredCached = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -303,22 +294,7 @@ export function SearchPage() {
             />
           </div>
 
-          {source === "verdaccio" ? (
-            <Button
-              onClick={() => refreshCached()}
-              disabled={cacheLoading}
-              variant="outline"
-            >
-              {cacheLoading ? (
-                <Loader2 className="h-4 w-4 animate-spin" />
-              ) : (
-                <>
-                  <RefreshCw className="mr-2 h-4 w-4" />
-                  刷新已缓存
-                </>
-              )}
-            </Button>
-          ) : (
+          {source === "npmjs" && (
             <Button onClick={handleSearch} disabled={searching}>
               {searching ? (
                 <Loader2 className="h-4 w-4 animate-spin" />
@@ -340,12 +316,7 @@ export function SearchPage() {
 
           {lastLoadedAt && (
             <span className="text-xs text-muted-foreground">
-              已缓存来源：
-              {cachedSource === "plugin"
-                ? "verdaccio 插件接口"
-                : cachedSource === "storage"
-                ? "storage 目录扫描"
-                : "无"}
+              已缓存来源：本地索引
               · {cachedAll.length} 个包 · 更新于{" "}
               {formatRelativeTime(lastLoadedAt)}
             </span>
@@ -480,13 +451,7 @@ export function SearchPage() {
             <div className="py-8 text-center text-muted-foreground">
               {source === "verdaccio" ? (
                 lastLoadedAt === null ? (
-                  <div className="space-y-3">
-                    <p className="text-sm">点击「刷新已缓存」加载列表</p>
-                    <Button variant="outline" onClick={() => refreshCached()}>
-                      <RefreshCw className="mr-2 h-4 w-4" />
-                      刷新已缓存
-                    </Button>
-                  </div>
+                  <p className="text-sm">索引为空，请在设置中配置源地址并同步</p>
                 ) : cachedError ? (
                   <p className="text-sm">{cachedError}</p>
                 ) : cachedAll.length === 0 ? (

@@ -1,17 +1,26 @@
 import { useEffect, useState } from "react";
 import { useTaskStore, CacheTask } from "@/stores/taskStore";
+import { useSyncStore } from "@/stores/syncStore";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { ChevronUp, ChevronDown, RotateCcw, Trash2 } from "lucide-react";
+import {
+  ChevronUp,
+  ChevronDown,
+  RotateCcw,
+  Trash2,
+} from "lucide-react";
 
 export function TaskBar() {
   const { tasks, fetchTasks, startListening, retryFailed, clearCompleted } =
     useTaskStore();
+  const sync = useSyncStore();
   const [expanded, setExpanded] = useState(false);
 
   useEffect(() => {
     startListening();
     fetchTasks();
+    sync.startListening();
+    sync.getSyncInfo();
   }, [startListening, fetchTasks]);
 
   const counts = {
