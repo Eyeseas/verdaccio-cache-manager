@@ -1,5 +1,6 @@
-import { useState, useCallback, useEffect, useMemo } from "react";
+import { useState, useCallback, useEffect, useMemo, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { useVirtualizer } from "@tanstack/react-virtual";
 import { useConfigStore } from "@/stores/configStore";
 import { useTaskStore } from "@/stores/taskStore";
 import { useCacheStore, type CachedPackage } from "@/stores/cacheStore";
@@ -7,7 +8,6 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Checkbox } from "@/components/ui/checkbox";
-import { ScrollArea } from "@/components/ui/scroll-area";
 import {
   Search,
   Loader2,
@@ -42,6 +42,7 @@ function formatRelativeTime(ts: number): string {
 export function SearchPage() {
   const { config } = useConfigStore();
   const { startCacheTasks } = useTaskStore();
+  const listRef = useRef<HTMLDivElement>(null);
 
   const {
     cachedAll,
@@ -88,6 +89,22 @@ export function SearchPage() {
   }, [cachedAll, query]);
 
   const displayResults = source === "verdaccio" ? filteredCached : results;
+
+  const rowVirtualizer = useVirtualizer({
+    count: displayResults.length,
+    getScrollElement: () => listRef.current,
+    estimateSize: () => 76,
+    getItemKey: (index) => displayResults[index]?.name ?? index,
+    overscan: 10,
+  });
+
+  useEffect(() => {
+    listRef.current?.scrollTo({ top: 0 });
+  }, [source, query, results, cachedAll]);
+
+  useEffect(() => {
+    rowVirtualizer.measure();
+  }, [expanded, stableOnly, displayResults.length, rowVirtualizer]);
 
   const handleSearch = useCallback(async () => {
     if (source === "verdaccio") return;
@@ -201,7 +218,7 @@ export function SearchPage() {
     const filtered = stableOnly
       ? versions.filter(isStableVersion)
       : versions;
-    return filtered.sort((a, b) => compareVersions(b, a));
+    return [...filtered].sort((a, b) => compareVersions(b, a));
   };
 
   return (
@@ -298,112 +315,135 @@ export function SearchPage() {
         </div>
       </div>
 
-      <ScrollArea className="min-h-0 flex-1">
-        <div className="space-y-1">
-          {displayResults.map((pkg) => (
-            <div key={pkg.name} className="rounded-lg border">
-              <div
-                className="flex cursor-pointer items-center gap-3 p-3 hover:bg-muted/50"
-                onClick={() => toggleExpand(pkg.name)}
-              >
-                {expanded[pkg.name] ? (
-                  <ChevronDown className="h-4 w-4 shrink-0" />
-                ) : (
-                  <ChevronRight className="h-4 w-4 shrink-0" />
-                )}
-                <div className="min-w-0 flex-1">
-                  <div className="flex items-center gap-2">
-                    <span className="font-medium">{pkg.name}</span>
-                    {pkg.latest_version && (
-                      <Badge variant="secondary">{pkg.latest_version}</Badge>
-                    )}
-                  </div>
-                  {pkg.description && (
-                    <p className="truncate text-sm text-muted-foreground">
-                      {pkg.description}
-                    </p>
-                  )}
-                </div>
-              </div>
+      <div ref={listRef} className="min-h-0 flex-1 overflow-auto">
+        {displayResults.length > 0 ? (
+          <div
+            className="relative"
+            style={{
+              height: `${rowVirtualizer.getTotalSize()}px`,
+            }}
+          >
+            {rowVirtualizer.getVirtualItems().map((row) => {
+              const pkg = displayResults[row.index];
+              if (!pkg) return null;
 
-              {expanded[pkg.name] && (
-                <div className="border-t px-3 py-2">
-                  {expanded[pkg.name].loading ? (
-                    <div className="flex items-center gap-2 py-2 text-sm text-muted-foreground">
-                      <Loader2 className="h-3 w-3 animate-spin" />
-                      加载版本列表...
-                    </div>
-                  ) : (
-                    <div className="max-h-48 overflow-y-auto">
-                      <div className="flex flex-wrap gap-2 py-1">
-                        {getFilteredVersions(expanded[pkg.name].versions).map(
-                          (v) => {
-                            const isCached =
-                              cachedVersionsByName.get(pkg.name)?.has(v) ??
-                              false;
-                            const isSelected =
-                              selected.get(pkg.name)?.has(v) || false;
+              const expandedPackage = expanded[pkg.name];
+              const filteredVersions = expandedPackage
+                ? getFilteredVersions(expandedPackage.versions)
+                : [];
 
-                            if (isCached) {
-                              return (
-                                <span
-                                  key={v}
-                                  title="已缓存到 Verdaccio"
-                                  className="flex items-center gap-1.5 rounded-md border border-emerald-500/40 bg-emerald-500/10 px-2 py-1 text-sm text-emerald-700 dark:text-emerald-400"
-                                >
-                                  <Check className="h-3.5 w-3.5" />
-                                  <span>{v}</span>
-                                </span>
-                              );
-                            }
-
-                            return (
-                              <label
-                                key={v}
-                                className={`flex cursor-pointer items-center gap-1.5 rounded-md border px-2 py-1 text-sm transition-colors ${
-                                  isSelected
-                                    ? "border-primary bg-primary/5"
-                                    : "hover:bg-muted"
-                                }`}
-                              >
-                                <Checkbox
-                                  checked={isSelected}
-                                  onCheckedChange={() =>
-                                    toggleVersion(pkg.name, v)
-                                  }
-                                  className="h-3.5 w-3.5"
-                                />
-                                <span>{v}</span>
-                              </label>
-                            );
-                          }
-                        )}
-                        {getFilteredVersions(expanded[pkg.name].versions)
-                          .length === 0 && (
-                          <span className="text-sm text-muted-foreground">
-                            {stableOnly
-                              ? "无正式版本"
-                              : "无版本信息"}
-                          </span>
+              return (
+                <div
+                  key={row.key}
+                  data-index={row.index}
+                  ref={rowVirtualizer.measureElement}
+                  className="absolute left-0 top-0 w-full pb-1"
+                  style={{
+                    transform: `translateY(${row.start}px)`,
+                  }}
+                >
+                  <div className="rounded-lg border">
+                    <div
+                      className="flex cursor-pointer items-center gap-3 p-3 hover:bg-muted/50"
+                      onClick={() => toggleExpand(pkg.name)}
+                    >
+                      {expandedPackage ? (
+                        <ChevronDown className="h-4 w-4 shrink-0" />
+                      ) : (
+                        <ChevronRight className="h-4 w-4 shrink-0" />
+                      )}
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center gap-2">
+                          <span className="font-medium">{pkg.name}</span>
+                          {pkg.latest_version && (
+                            <Badge variant="secondary">
+                              {pkg.latest_version}
+                            </Badge>
+                          )}
+                        </div>
+                        {pkg.description && (
+                          <p className="truncate text-sm text-muted-foreground">
+                            {pkg.description}
+                          </p>
                         )}
                       </div>
                     </div>
-                  )}
-                </div>
-              )}
-            </div>
-          ))}
 
-          {!searching && !cacheLoading && displayResults.length === 0 && (
+                    {expandedPackage && (
+                      <div className="border-t px-3 py-2">
+                        {expandedPackage.loading ? (
+                          <div className="flex items-center gap-2 py-2 text-sm text-muted-foreground">
+                            <Loader2 className="h-3 w-3 animate-spin" />
+                            加载版本列表...
+                          </div>
+                        ) : (
+                          <div className="max-h-48 overflow-y-auto">
+                            <div className="flex flex-wrap gap-2 py-1">
+                              {filteredVersions.map((v) => {
+                                const isCached =
+                                  cachedVersionsByName
+                                    .get(pkg.name)
+                                    ?.has(v) ?? false;
+                                const isSelected =
+                                  selected.get(pkg.name)?.has(v) || false;
+
+                                if (isCached) {
+                                  return (
+                                    <span
+                                      key={v}
+                                      title="已缓存到 Verdaccio"
+                                      className="flex items-center gap-1.5 rounded-md border border-emerald-500/40 bg-emerald-500/10 px-2 py-1 text-sm text-emerald-700 dark:text-emerald-400"
+                                    >
+                                      <Check className="h-3.5 w-3.5" />
+                                      <span>{v}</span>
+                                    </span>
+                                  );
+                                }
+
+                                return (
+                                  <label
+                                    key={v}
+                                    className={`flex cursor-pointer items-center gap-1.5 rounded-md border px-2 py-1 text-sm transition-colors ${
+                                      isSelected
+                                        ? "border-primary bg-primary/5"
+                                        : "hover:bg-muted"
+                                    }`}
+                                  >
+                                    <Checkbox
+                                      checked={isSelected}
+                                      onCheckedChange={() =>
+                                        toggleVersion(pkg.name, v)
+                                      }
+                                      className="h-3.5 w-3.5"
+                                    />
+                                    <span>{v}</span>
+                                  </label>
+                                );
+                              })}
+                              {filteredVersions.length === 0 && (
+                                <span className="text-sm text-muted-foreground">
+                                  {stableOnly ? "无正式版本" : "无版本信息"}
+                                </span>
+                              )}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        ) : (
+          !searching &&
+          !cacheLoading && (
             <div className="py-8 text-center text-muted-foreground">
               {source === "verdaccio" ? (
                 lastLoadedAt === null ? (
                   <div className="space-y-3">
                     <p className="text-sm">点击「刷新已缓存」加载列表</p>
-                    <Button
-                      variant="outline"
-                      onClick={() => refreshCached()}
-                    >
+                    <Button variant="outline" onClick={() => refreshCached()}>
                       <RefreshCw className="mr-2 h-4 w-4" />
                       刷新已缓存
                     </Button>
@@ -419,9 +459,9 @@ export function SearchPage() {
                 <p>未找到匹配的包</p>
               ) : null}
             </div>
-          )}
-        </div>
-      </ScrollArea>
+          )
+        )}
+      </div>
 
       {totalSelected > 0 && (
         <div className="-mx-6 -mb-6 mt-4 flex items-center justify-between border-t bg-background px-6 py-3">

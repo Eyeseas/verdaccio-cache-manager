@@ -1,12 +1,12 @@
 import { useState, useCallback, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
+import { useVirtualizer } from "@tanstack/react-virtual";
 import { useTaskStore } from "@/stores/taskStore";
 import { useTauriFileDrop } from "@/hooks/useTauriFileDrop";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Badge } from "@/components/ui/badge";
-import { ScrollArea } from "@/components/ui/scroll-area";
 import { FileInput, Loader2, FolderOpen } from "lucide-react";
 
 const SUPPORTED_FILES = [
@@ -38,6 +38,14 @@ export function ImportPage() {
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [error, setError] = useState<string | null>(null);
   const dropZoneRef = useRef<HTMLDivElement>(null);
+  const listRef = useRef<HTMLDivElement>(null);
+
+  const rowVirtualizer = useVirtualizer({
+    count: deps.length,
+    getScrollElement: () => listRef.current,
+    estimateSize: () => 37,
+    overscan: 12,
+  });
 
   const handleSelectFile = async () => {
     const file = await open({
@@ -196,41 +204,62 @@ export function ImportPage() {
             </div>
           </div>
 
-          <ScrollArea className="min-h-0 flex-1 rounded-md border">
-            <div className="divide-y">
-              {deps.map((dep, i) => (
-                <div
-                  key={`${dep.name}@${dep.version}-${i}`}
-                  className="flex items-center gap-3 px-4 py-2"
-                >
-                  {!dep.cached ? (
-                    <Checkbox
-                      checked={selected.has(i)}
-                      onCheckedChange={() => toggleSelect(i)}
-                    />
-                  ) : (
-                    <span className="h-4 w-4" />
-                  )}
-                  <span className="min-w-0 flex-1 truncate font-mono text-sm">
-                    {dep.name}
-                  </span>
-                  <span className="text-sm text-muted-foreground">
-                    {dep.version}
-                  </span>
-                  {dep.cached ? (
-                    <Badge
-                      variant="outline"
-                      className="border-green-300 text-green-600"
-                    >
-                      已缓存
-                    </Badge>
-                  ) : (
-                    <Badge variant="secondary">未缓存</Badge>
-                  )}
-                </div>
-              ))}
+          <div
+            ref={listRef}
+            className="min-h-0 flex-1 overflow-auto rounded-md border"
+          >
+            <div
+              style={{
+                height: `${rowVirtualizer.getTotalSize()}px`,
+                position: "relative",
+              }}
+            >
+              {rowVirtualizer.getVirtualItems().map((row) => {
+                const i = row.index;
+                const dep = deps[i];
+                return (
+                  <div
+                    key={`${dep.name}@${dep.version}-${i}`}
+                    data-index={row.index}
+                    ref={rowVirtualizer.measureElement}
+                    style={{
+                      position: "absolute",
+                      top: 0,
+                      left: 0,
+                      width: "100%",
+                      transform: `translateY(${row.start}px)`,
+                    }}
+                    className="flex items-center gap-3 border-b px-4 py-2"
+                  >
+                    {!dep.cached ? (
+                      <Checkbox
+                        checked={selected.has(i)}
+                        onCheckedChange={() => toggleSelect(i)}
+                      />
+                    ) : (
+                      <span className="h-4 w-4" />
+                    )}
+                    <span className="min-w-0 flex-1 truncate font-mono text-sm">
+                      {dep.name}
+                    </span>
+                    <span className="text-sm text-muted-foreground">
+                      {dep.version}
+                    </span>
+                    {dep.cached ? (
+                      <Badge
+                        variant="outline"
+                        className="border-green-300 text-green-600"
+                      >
+                        已缓存
+                      </Badge>
+                    ) : (
+                      <Badge variant="secondary">未缓存</Badge>
+                    )}
+                  </div>
+                );
+              })}
             </div>
-          </ScrollArea>
+          </div>
 
           {selected.size > 0 && (
             <div className="-mx-6 -mb-6 mt-4 flex items-center justify-between border-t bg-background px-6 py-3">
