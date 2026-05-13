@@ -11,6 +11,7 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 import { useConfigStore } from "@/stores/configStore";
 import { useTaskStore } from "@/stores/taskStore";
 import { useCacheStore, type CachedPackage } from "@/stores/cacheStore";
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
@@ -259,28 +260,15 @@ export function SearchPage() {
         <h1 className="text-2xl font-bold">搜索与缓存</h1>
 
         <div className="flex gap-2">
-          <div className="flex rounded-md border">
-            <button
-              className={`px-3 py-1.5 text-sm transition-colors ${
-                source === "npmjs"
-                  ? "bg-primary text-primary-foreground"
-                  : "hover:bg-muted"
-              }`}
-              onClick={() => setSource("npmjs")}
-            >
-              npmjs
-            </button>
-            <button
-              className={`px-3 py-1.5 text-sm transition-colors ${
-                source === "verdaccio"
-                  ? "bg-primary text-primary-foreground"
-                  : "hover:bg-muted"
-              }`}
-              onClick={() => setSource("verdaccio")}
-            >
-              Verdaccio
-            </button>
-          </div>
+          <Tabs
+            value={source}
+            onValueChange={(val) => setSource(val as RegistrySource)}
+          >
+            <TabsList>
+              <TabsTrigger value="npmjs">npmjs</TabsTrigger>
+              <TabsTrigger value="verdaccio">Verdaccio</TabsTrigger>
+            </TabsList>
+          </Tabs>
 
           <div className="relative flex-1">
             <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
