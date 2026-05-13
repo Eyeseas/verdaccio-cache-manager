@@ -14,7 +14,7 @@ use dependency_resolver::ResolvedDep;
 use local_scanner::LocalPackage;
 use parser::ParsedDependency;
 use registry_client::SearchResult;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Arc;
 use sync_engine::SyncEngine;
@@ -317,6 +317,88 @@ async fn upload_tgz_files(
     Ok(())
 }
 
+#[derive(Clone, Serialize)]
+struct DownloadProgressEvent {
+    completed: usize,
+    total: usize,
+    current: String,
+}
+
+#[tauri::command]
+async fn download_tarballs(
+    app_handle: tauri::AppHandle,
+    packages: Vec<CacheRequest>,
+    output_dir: String,
+) -> Result<usize, String> {
+    use tauri::Emitter;
+    use tokio::fs;
+
+    let dir = PathBuf::from(&output_dir);
+    fs::create_dir_all(&dir)
+        .await
+        .map_err(|e| format!("创建目录失败: {}", e))?;
+
+    let http = reqwest::Client::new();
+    let total = packages.len();
+    let mut completed = 0usize;
+
+    for pkg in &packages {
+        let name_part = if pkg.package_name.starts_with('@') {
+            pkg.package_name.replace('/', "-")
+        } else {
+            pkg.package_name.clone()
+        };
+        let filename = format!("{}-{}.tgz", name_part, pkg.version);
+        let file_path = dir.join(&filename);
+
+        let _ = app_handle.emit(
+            "download-tarball-progress",
+            DownloadProgressEvent {
+                completed,
+                total,
+                current: format!("{}@{}", pkg.package_name, pkg.version),
+            },
+        );
+
+        let tarball_url = format!(
+            "https://registry.npmjs.org/{}/-/{}-{}.tgz",
+            pkg.package_name,
+            pkg.package_name.split('/').last().unwrap_or(&pkg.package_name),
+            pkg.version
+        );
+
+        match http.get(&tarball_url).send().await {
+            Ok(resp) if resp.status().is_success() => {
+                let bytes = resp.bytes().await.map_err(|e| e.to_string())?;
+                fs::write(&file_path, &bytes)
+                    .await
+                    .map_err(|e| format!("写入文件失败: {}", e))?;
+                completed += 1;
+            }
+            Ok(resp) => {
+                return Err(format!(
+                    "下载 {}@{} 失败 (HTTP {})",
+                    pkg.package_name, pkg.version, resp.status()
+                ));
+            }
+            Err(e) => {
+                return Err(format!("下载 {}@{} 失败: {}", pkg.package_name, pkg.version, e));
+            }
+        }
+    }
+
+    let _ = app_handle.emit(
+        "download-tarball-progress",
+        DownloadProgressEvent {
+            completed,
+            total,
+            current: String::new(),
+        },
+    );
+
+    Ok(completed)
+}
+
 #[tauri::command]
 async fn check_cached_status(
     state: tauri::State<'_, AppState>,
@@ -453,6 +535,7 @@ pub fn run() {
             start_cache_sync,
             get_sync_info,
             clear_cache_index,
+            download_tarballs,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

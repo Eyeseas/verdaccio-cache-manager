@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Badge } from "@/components/ui/badge";
 import { FileInput, Loader2, FolderOpen } from "lucide-react";
+import { ExportDropdown } from "@/components/ExportDropdown";
 
 const SUPPORTED_FILES = [
   "package.json",
@@ -333,6 +334,14 @@ export function ImportPage() {
                 已选择 <strong>{selected.size}</strong> 个包
               </span>
               <div className="flex gap-2">
+                <ExportDropdown
+                  getSelectedPackages={() =>
+                    Array.from(selected).map((i) => ({
+                      package_name: deps[i].name,
+                      version: deps[i].version,
+                    }))
+                  }
+                />
                 <Button
                   variant="outline"
                   onClick={handleCacheWithDeps}

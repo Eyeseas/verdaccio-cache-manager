@@ -23,6 +23,7 @@ import {
   ChevronRight,
   Check,
 } from "lucide-react";
+import { ExportDropdown } from "@/components/ExportDropdown";
 
 type SearchResult = CachedPackage;
 
@@ -464,6 +465,17 @@ export function SearchPage() {
             已选择 <strong>{totalSelected}</strong> 个版本
           </span>
           <div className="flex gap-2">
+            <ExportDropdown
+              getSelectedPackages={() => {
+                const packages: { package_name: string; version: string }[] = [];
+                selected.forEach((versions, pkgName) => {
+                  versions.forEach((v) => {
+                    packages.push({ package_name: pkgName, version: v });
+                  });
+                });
+                return packages;
+              }}
+            />
             <Button
               variant="outline"
               onClick={handleCacheWithDeps}
