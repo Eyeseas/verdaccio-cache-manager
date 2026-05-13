@@ -1,7 +1,7 @@
 # Verdaccio Cache Manager
 
 <p>
-  <img alt="version" src="https://img.shields.io/badge/version-0.1.3-blue" />
+  <img alt="version" src="https://img.shields.io/badge/version-0.1.4-blue" />
   <img alt="platform" src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey" />
   <img alt="license" src="https://img.shields.io/badge/license-MIT-green" />
 </p>
@@ -30,9 +30,11 @@
 | macOS (Apple Silicon) | `*_aarch64.dmg` |
 | macOS (Intel) | `*_x64.dmg` |
 | Windows | `*_x64-setup.exe` / `*_x64_en-US.msi` |
+| Windows（内网 / 旧 WebView2） | `*_offline-webview2-setup.exe` / `*_offline-webview2.msi` |
 | Linux | `*_amd64.deb` / `*_amd64.AppImage` |
 
 > 应用未签名，首次打开 macOS 可能需要在「系统设置 → 隐私与安全性」放行。
+> `offline-webview2` Windows 包会内置 WebView2 离线安装器，安装包更大，适合不能联网或系统 WebView2 版本过旧的机器；普通 Windows 包保持原来的较小体积。
 
 ## 快速开始
 

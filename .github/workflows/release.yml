@@ -23,22 +23,38 @@ jobs:
             platform: macos-latest
             target: aarch64-apple-darwin
             args: --target aarch64-apple-darwin
+            assetNamePattern: ""
+            includeUpdaterJson: true
           - name: macos-x64
             platform: macos-latest
             target: x86_64-apple-darwin
             args: --target x86_64-apple-darwin
+            assetNamePattern: ""
+            includeUpdaterJson: true
           - name: linux-x64
             platform: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             args: ""
+            assetNamePattern: ""
+            includeUpdaterJson: true
           - name: linux-arm64
             platform: ubuntu-22.04-arm
             target: aarch64-unknown-linux-gnu
             args: ""
+            assetNamePattern: ""
+            includeUpdaterJson: true
           - name: windows-x64
             platform: windows-latest
             target: x86_64-pc-windows-msvc
             args: ""
+            assetNamePattern: ""
+            includeUpdaterJson: true
+          - name: windows-x64-offline-webview2
+            platform: windows-latest
+            target: x86_64-pc-windows-msvc
+            args: --target x86_64-pc-windows-msvc --config src-tauri/tauri.windows-offline.conf.json
+            assetNamePattern: "[name]_[version]_[platform]_[arch]_offline-webview2[setup][ext]"
+            includeUpdaterJson: false
 
     runs-on: ${{ matrix.platform }}
     name: build (${{ matrix.name }})
@@ -118,6 +134,8 @@ jobs:
           releaseDraft: true
           prerelease: false
           args: ${{ matrix.args }}
+          assetNamePattern: ${{ matrix.assetNamePattern }}
+          includeUpdaterJson: ${{ matrix.includeUpdaterJson }}
 
       - name: Build without publishing
         if: steps.tag.outputs.publish != 'true'
@@ -126,6 +144,8 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           args: ${{ matrix.args }}
+          assetNamePattern: ${{ matrix.assetNamePattern }}
+          includeUpdaterJson: ${{ matrix.includeUpdaterJson }}
 
       - name: Upload artifacts (no-release runs)
         if: steps.tag.outputs.publish != 'true'
