@@ -1,4 +1,11 @@
-import { useState, useCallback, useEffect, useMemo, useRef } from "react";
+import {
+  useState,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+} from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { useConfigStore } from "@/stores/configStore";
@@ -102,8 +109,16 @@ export function SearchPage() {
     listRef.current?.scrollTo({ top: 0 });
   }, [source, query, results, cachedAll]);
 
-  useEffect(() => {
-    rowVirtualizer.measure();
+  useLayoutEffect(() => {
+    const measureVisibleRows = () => {
+      listRef.current
+        ?.querySelectorAll<HTMLElement>("[data-virtual-row]")
+        .forEach((node) => rowVirtualizer.measureElement(node));
+    };
+
+    measureVisibleRows();
+    const frame = window.requestAnimationFrame(measureVisibleRows);
+    return () => window.cancelAnimationFrame(frame);
   }, [expanded, stableOnly, displayResults.length, rowVirtualizer]);
 
   const handleSearch = useCallback(async () => {
@@ -336,6 +351,7 @@ export function SearchPage() {
                 <div
                   key={row.key}
                   data-index={row.index}
+                  data-virtual-row
                   ref={rowVirtualizer.measureElement}
                   className="absolute left-0 top-0 w-full pb-1"
                   style={{
