@@ -19,17 +19,47 @@ pub fn parse_package_json(content: &str) -> Result<Vec<ParsedDependency>, String
         if let Some(obj) = json[field].as_object() {
             for (name, version) in obj {
                 if let Some(v) = version.as_str() {
-                    deps.push(ParsedDependency {
-                        name: name.clone(),
-                        version: v.to_string(),
-                        tarball_url: None,
-                    });
+                    if let Some(clean) = clean_semver_range(v) {
+                        deps.push(ParsedDependency {
+                            name: name.clone(),
+                            version: clean,
+                            tarball_url: None,
+                        });
+                    }
                 }
             }
         }
     }
 
     Ok(deps)
+}
+
+fn clean_semver_range(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() || trimmed == "*" || trimmed == "latest" || trimmed.contains("||") {
+        return None;
+    }
+    // Strip leading range operators: ^, ~, >=, >, <=, <, =
+    let v = trimmed
+        .trim_start_matches(">=")
+        .trim_start_matches("<=")
+        .trim_start_matches('>')
+        .trim_start_matches('<')
+        .trim_start_matches('~')
+        .trim_start_matches('^')
+        .trim_start_matches('=')
+        .trim();
+    // Take only the first space-separated token (handles ">=1.0.0 <2.0.0")
+    let v = v.split_whitespace().next().unwrap_or(v);
+    // Must start with a digit to be a valid version
+    if v.is_empty() || !v.chars().next().map_or(false, |c| c.is_ascii_digit()) {
+        return None;
+    }
+    // Skip versions containing 'x' or '*' wildcards like "1.x" or "1.0.*"
+    if v.contains('x') || v.contains('*') {
+        return None;
+    }
+    Some(v.to_string())
 }
 
 pub fn parse_pnpm_lock(content: &str) -> Result<Vec<ParsedDependency>, String> {

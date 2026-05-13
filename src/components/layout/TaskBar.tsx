@@ -2,7 +2,6 @@ import { useEffect, useState } from "react";
 import { useTaskStore, CacheTask } from "@/stores/taskStore";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { ScrollArea } from "@/components/ui/scroll-area";
 import { ChevronUp, ChevronDown, RotateCcw, Trash2 } from "lucide-react";
 
 export function TaskBar() {
@@ -98,13 +97,13 @@ export function TaskBar() {
       </div>
 
       {expanded && (
-        <ScrollArea className="max-h-48 border-t">
+        <div className="max-h-60 overflow-y-auto border-t">
           <div className="divide-y">
             {tasks.map((task) => (
               <TaskRow key={task.id} task={task} />
             ))}
           </div>
-        </ScrollArea>
+        </div>
       )}
     </footer>
   );
