@@ -145,6 +145,7 @@ function ScanTab() {
     const pkgs = Array.from(selected).map((i) => ({
       package_name: packages[i].name,
       version: packages[i].version,
+      tarball_url: `dir://${packages[i].path}`,
     }));
     if (pkgs.length === 0) return;
     await startCacheTasks(pkgs);
