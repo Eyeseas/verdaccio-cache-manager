@@ -157,7 +157,7 @@ export function SettingsPage() {
             <p className="text-xs text-muted-foreground">
               用于在「搜索 → Verdaccio」中列出已缓存包（含 proxy
               缓存）。可填本地路径或通过 SMB/NFS/sshfs 挂载的远程目录。若 Verdaccio
-              安装了 verdaccio-plugin-cached-list 插件则可不填。
+              安装了 verdaccio-cached-list 插件则可不填。
             </p>
           </div>
 

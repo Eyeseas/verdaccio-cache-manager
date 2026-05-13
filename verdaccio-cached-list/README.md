@@ -1,4 +1,4 @@
-# verdaccio-plugin-cached-list
+# verdaccio-cached-list
 
 Verdaccio middleware plugin that exposes **all cached packages** (including proxy-cached) via a single HTTP endpoint.
 
@@ -9,14 +9,14 @@ Verdaccio's built-in `/-/verdaccio/data/packages` only returns locally **publish
 In the same container where Verdaccio runs:
 
 ```bash
-npm install -g verdaccio-plugin-cached-list
+npm install -g verdaccio-cached-list
 ```
 
 Or if using the official Docker image, build a custom image:
 
 ```dockerfile
 FROM verdaccio/verdaccio:6
-RUN npm install -g verdaccio-plugin-cached-list
+RUN npm install -g verdaccio-cached-list
 ```
 
 ## Configure

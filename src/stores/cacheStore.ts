@@ -69,7 +69,7 @@ export const useCacheStore = create<CacheStore>((set) => ({
       } else {
         set({
           cachedError:
-            "未安装 verdaccio-plugin-cached-list 插件，且未配置 storage 路径（设置页中可填）",
+            "未安装 verdaccio-cached-list 插件，且未配置 storage 路径（设置页中可填）",
         });
       }
       set({ cachedAll: [], cachedSource: "none" });
