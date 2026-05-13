@@ -64,6 +64,7 @@ jobs:
           targets: ${{ matrix.target }}
 
       - name: Cache Cargo registry & target
+        if: runner.os != 'Windows'
         uses: swatinem/rust-cache@v2
         with:
           workspaces: "./src-tauri -> target"

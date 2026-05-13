@@ -1,6 +1,6 @@
 [package]
 name = "verdaccio-cache-manager"
-version = "0.1.2"
+version = "0.1.3"
 description = "A Tauri desktop app for caching npm packages to private Verdaccio"
 authors = ["eyeseas"]
 edition = "2021"
