@@ -48,7 +48,7 @@ function formatRelativeTime(ts: number): string {
 
 export function SearchPage() {
   const { config } = useConfigStore();
-  const { startCacheTasks } = useTaskStore();
+  const { startCacheTasks, resolveDependencies } = useTaskStore();
   const listRef = useRef<HTMLDivElement>(null);
 
   const {
@@ -69,6 +69,7 @@ export function SearchPage() {
     new Map()
   );
   const [stableOnly, setStableOnly] = useState(true);
+  const [resolving, setResolving] = useState(false);
 
   const registryUrl =
     source === "npmjs" ? "https://registry.npmjs.org" : config.registry_url;
@@ -227,6 +228,28 @@ export function SearchPage() {
     if (packages.length === 0) return;
     await startCacheTasks(packages);
     setSelected(new Map());
+  };
+
+  const handleCacheWithDeps = async () => {
+    const packages: { package_name: string; version: string }[] = [];
+    selected.forEach((versions, pkgName) => {
+      versions.forEach((v) => {
+        packages.push({ package_name: pkgName, version: v });
+      });
+    });
+    if (packages.length === 0) return;
+    setResolving(true);
+    try {
+      const resolved = await resolveDependencies(packages);
+      await startCacheTasks(
+        resolved.map((r) => ({ package_name: r.package_name, version: r.version }))
+      );
+      setSelected(new Map());
+    } catch (e) {
+      console.error("依赖解析失败:", e);
+    } finally {
+      setResolving(false);
+    }
   };
 
   const getFilteredVersions = (versions: string[]) => {
@@ -484,7 +507,23 @@ export function SearchPage() {
           <span className="text-sm">
             已选择 <strong>{totalSelected}</strong> 个版本
           </span>
-          <Button onClick={handleCache}>缓存到私服</Button>
+          <div className="flex gap-2">
+            <Button
+              variant="outline"
+              onClick={handleCacheWithDeps}
+              disabled={resolving}
+            >
+              {resolving ? (
+                <>
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                  解析依赖中...
+                </>
+              ) : (
+                "缓存包及依赖"
+              )}
+            </Button>
+            <Button onClick={handleCache}>缓存到私服</Button>
+          </div>
         </div>
       )}
     </div>

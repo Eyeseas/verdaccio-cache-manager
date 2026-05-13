@@ -1,4 +1,5 @@
 pub mod config;
+pub mod dependency_resolver;
 pub mod local_scanner;
 pub mod parser;
 pub mod registry_client;
@@ -6,6 +7,7 @@ pub mod storage_scanner;
 pub mod task_engine;
 
 use config::AppConfig;
+use dependency_resolver::ResolvedDep;
 use local_scanner::LocalPackage;
 use parser::ParsedDependency;
 use registry_client::SearchResult;
@@ -192,6 +194,15 @@ async fn parse_file(file_path: String) -> Result<Vec<ParsedDependency>, String> 
     parser::detect_and_parse(&path)
 }
 
+#[tauri::command]
+async fn resolve_dependencies(packages: Vec<CacheRequest>) -> Result<Vec<ResolvedDep>, String> {
+    let initial: Vec<(String, String)> = packages
+        .into_iter()
+        .map(|p| (p.package_name, p.version))
+        .collect();
+    dependency_resolver::resolve_all(initial).await
+}
+
 #[derive(serde::Serialize, Clone)]
 struct ScanProgressEvent {
     count: usize,
@@ -298,6 +309,7 @@ pub fn run() {
             retry_failed_tasks,
             clear_completed_tasks,
             parse_file,
+            resolve_dependencies,
             scan_node_modules,
             parse_tgz,
             upload_tgz_files,

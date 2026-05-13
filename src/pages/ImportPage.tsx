@@ -30,13 +30,14 @@ interface DependencyWithStatus extends ParsedDependency {
 }
 
 export function ImportPage() {
-  const { startCacheTasks } = useTaskStore();
+  const { startCacheTasks, resolveDependencies } = useTaskStore();
 
   const [deps, setDeps] = useState<DependencyWithStatus[]>([]);
   const [loading, setLoading] = useState(false);
   const [fileName, setFileName] = useState<string | null>(null);
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [error, setError] = useState<string | null>(null);
+  const [resolving, setResolving] = useState(false);
   const dropZoneRef = useRef<HTMLDivElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
 
@@ -134,6 +135,26 @@ export function ImportPage() {
     if (packages.length === 0) return;
     await startCacheTasks(packages);
     setSelected(new Set());
+  };
+
+  const handleCacheWithDeps = async () => {
+    const packages = Array.from(selected).map((i) => ({
+      package_name: deps[i].name,
+      version: deps[i].version,
+    }));
+    if (packages.length === 0) return;
+    setResolving(true);
+    try {
+      const resolved = await resolveDependencies(packages);
+      await startCacheTasks(
+        resolved.map((r) => ({ package_name: r.package_name, version: r.version }))
+      );
+      setSelected(new Set());
+    } catch (e) {
+      console.error("依赖解析失败:", e);
+    } finally {
+      setResolving(false);
+    }
   };
 
   const uncachedCount = deps.filter((d) => !d.cached).length;
@@ -266,7 +287,23 @@ export function ImportPage() {
               <span className="text-sm">
                 已选择 <strong>{selected.size}</strong> 个包
               </span>
-              <Button onClick={handleCache}>缓存到私服</Button>
+              <div className="flex gap-2">
+                <Button
+                  variant="outline"
+                  onClick={handleCacheWithDeps}
+                  disabled={resolving}
+                >
+                  {resolving ? (
+                    <>
+                      <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                      解析依赖中...
+                    </>
+                  ) : (
+                    "缓存包及依赖"
+                  )}
+                </Button>
+                <Button onClick={handleCache}>缓存到私服</Button>
+              </div>
             </div>
           )}
         </>
