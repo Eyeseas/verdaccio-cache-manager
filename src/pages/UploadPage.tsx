@@ -1,14 +1,17 @@
-import { useState, useRef } from "react";
+import { useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
+import { useVirtualizer } from "@tanstack/react-virtual";
 import { useTaskStore } from "@/stores/taskStore";
 import { useTauriFileDrop } from "@/hooks/useTauriFileDrop";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Badge } from "@/components/ui/badge";
+import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { FolderOpen, Upload, Loader2, Package } from "lucide-react";
+import { FolderOpen, Upload, Loader2, Package, Search } from "lucide-react";
 
 const isTgzFile = (path: string) => path.toLowerCase().endsWith(".tgz");
 
@@ -20,6 +23,11 @@ interface LocalPackage {
 
 interface PackageWithStatus extends LocalPackage {
   cached: boolean;
+}
+
+interface ScanProgressEvent {
+  count: number;
+  current: string;
 }
 
 export function UploadPage() {
@@ -50,6 +58,9 @@ function ScanTab() {
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [dirPath, setDirPath] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [progress, setProgress] = useState<ScanProgressEvent | null>(null);
+  const [query, setQuery] = useState("");
+  const listRef = useRef<HTMLDivElement>(null);
 
   const handleSelectDir = async () => {
     const dir = await open({ directory: true });
@@ -60,6 +71,11 @@ function ScanTab() {
     setSelected(new Set());
     setDirPath(dir);
     setError(null);
+    setProgress(null);
+
+    const unlistenPromise = listen<ScanProgressEvent>("scan-progress", (e) => {
+      setProgress(e.payload);
+    });
 
     try {
       const scanned = await invoke<LocalPackage[]>("scan_node_modules", {
@@ -79,11 +95,14 @@ function ScanTab() {
       setPackages(withStatus);
       const allIndices = new Set<number>(withStatus.map((_, i) => i));
       setSelected(allIndices);
+      setQuery("");
     } catch (e) {
       console.error("扫描失败:", e);
       setError(`扫描失败: ${e}`);
     } finally {
+      (await unlistenPromise)();
       setLoading(false);
+      setProgress(null);
     }
   };
 
@@ -96,12 +115,28 @@ function ScanTab() {
     });
   };
 
+  const filteredIndices = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return packages.map((_, i) => i);
+    return packages
+      .map((p, i) => ({ p, i }))
+      .filter(({ p }) => p.name.toLowerCase().includes(q))
+      .map(({ i }) => i);
+  }, [packages, query]);
+
+  const rowVirtualizer = useVirtualizer({
+    count: filteredIndices.length,
+    getScrollElement: () => listRef.current,
+    estimateSize: () => 36,
+    overscan: 12,
+  });
+
   const selectAllUncached = () => {
-    const uncached = new Set<number>();
-    packages.forEach((p, i) => {
-      if (!p.cached) uncached.add(i);
-    });
-    setSelected(uncached);
+    const next = new Set(selected);
+    for (const i of filteredIndices) {
+      if (!packages[i].cached) next.add(i);
+    }
+    setSelected(next);
   };
 
   const deselectAll = () => setSelected(new Set());
@@ -120,9 +155,19 @@ function ScanTab() {
 
   if (loading) {
     return (
-      <div className="flex flex-1 items-center justify-center">
-        <Loader2 className="mr-2 h-5 w-5 animate-spin" />
-        <span>扫描 node_modules 中...</span>
+      <div className="flex flex-1 flex-col items-center justify-center gap-2">
+        <div className="flex items-center">
+          <Loader2 className="mr-2 h-5 w-5 animate-spin" />
+          <span>
+            扫描 node_modules 中
+            {progress ? `... 已发现 ${progress.count} 个包` : "..."}
+          </span>
+        </div>
+        {progress?.current && (
+          <span className="max-w-md truncate font-mono text-xs text-muted-foreground">
+            {progress.current}
+          </span>
+        )}
       </div>
     );
   }
@@ -146,6 +191,8 @@ function ScanTab() {
     );
   }
 
+  const filtering = query.trim().length > 0;
+
   return (
     <div className="flex min-h-0 flex-1 flex-col pt-3">
       <div className="mb-3 flex items-center justify-between gap-3">
@@ -155,11 +202,12 @@ function ScanTab() {
           </Badge>
           <span className="shrink-0 text-sm text-muted-foreground">
             共 {packages.length} 个包，{uncachedCount} 个未缓存
+            {filtering && `（已筛选 ${filteredIndices.length}）`}
           </span>
         </div>
         <div className="flex shrink-0 gap-2">
           <Button variant="ghost" size="sm" onClick={selectAllUncached}>
-            全选未缓存
+            {filtering ? "全选当前未缓存" : "全选未缓存"}
           </Button>
           <Button variant="ghost" size="sm" onClick={deselectAll}>
             取消全选
@@ -170,41 +218,79 @@ function ScanTab() {
         </div>
       </div>
 
-      <ScrollArea className="min-h-0 flex-1 rounded-md border">
-        <div className="divide-y">
-          {packages.map((pkg, i) => (
-            <div
-              key={`${pkg.name}@${pkg.version}`}
-              className="flex items-center gap-3 px-4 py-2"
-            >
-              {!pkg.cached ? (
-                <Checkbox
-                  checked={selected.has(i)}
-                  onCheckedChange={() => toggleSelect(i)}
-                />
-              ) : (
-                <span className="h-4 w-4" />
-              )}
-              <span className="min-w-0 flex-1 truncate font-mono text-sm">
-                {pkg.name}
-              </span>
-              <span className="text-sm text-muted-foreground">
-                {pkg.version}
-              </span>
-              {pkg.cached ? (
-                <Badge
-                  variant="outline"
-                  className="border-green-300 text-green-600"
+      <div className="relative mb-3">
+        <Search className="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+        <Input
+          type="search"
+          placeholder="按包名搜索..."
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          className="h-9 pl-8"
+        />
+      </div>
+
+      <div
+        ref={listRef}
+        className="min-h-0 flex-1 overflow-auto rounded-md border"
+      >
+        {filteredIndices.length === 0 ? (
+          <div className="flex h-full items-center justify-center p-6 text-sm text-muted-foreground">
+            未匹配到任何包
+          </div>
+        ) : (
+          <div
+            style={{
+              height: `${rowVirtualizer.getTotalSize()}px`,
+              position: "relative",
+            }}
+          >
+            {rowVirtualizer.getVirtualItems().map((row) => {
+              const idx = filteredIndices[row.index];
+              const pkg = packages[idx];
+              return (
+                <div
+                  key={`${pkg.name}@${pkg.version}-${idx}`}
+                  data-index={row.index}
+                  ref={rowVirtualizer.measureElement}
+                  style={{
+                    position: "absolute",
+                    top: 0,
+                    left: 0,
+                    width: "100%",
+                    transform: `translateY(${row.start}px)`,
+                  }}
+                  className="flex items-center gap-3 border-b px-4 py-2"
                 >
-                  已缓存
-                </Badge>
-              ) : (
-                <Badge variant="secondary">未缓存</Badge>
-              )}
-            </div>
-          ))}
-        </div>
-      </ScrollArea>
+                  {!pkg.cached ? (
+                    <Checkbox
+                      checked={selected.has(idx)}
+                      onCheckedChange={() => toggleSelect(idx)}
+                    />
+                  ) : (
+                    <span className="h-4 w-4" />
+                  )}
+                  <span className="min-w-0 flex-1 truncate font-mono text-sm">
+                    {pkg.name}
+                  </span>
+                  <span className="text-sm text-muted-foreground">
+                    {pkg.version}
+                  </span>
+                  {pkg.cached ? (
+                    <Badge
+                      variant="outline"
+                      className="border-green-300 text-green-600"
+                    >
+                      已缓存
+                    </Badge>
+                  ) : (
+                    <Badge variant="secondary">未缓存</Badge>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
 
       {selected.size > 0 && (
         <div className="mt-4 flex items-center justify-between rounded-lg border bg-muted/30 p-3">

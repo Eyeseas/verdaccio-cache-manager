@@ -192,10 +192,38 @@ async fn parse_file(file_path: String) -> Result<Vec<ParsedDependency>, String> 
     parser::detect_and_parse(&path)
 }
 
+#[derive(serde::Serialize, Clone)]
+struct ScanProgressEvent {
+    count: usize,
+    current: String,
+}
+
 #[tauri::command]
-async fn scan_node_modules(dir_path: String) -> Result<Vec<LocalPackage>, String> {
+async fn scan_node_modules(
+    app_handle: tauri::AppHandle,
+    dir_path: String,
+) -> Result<Vec<LocalPackage>, String> {
+    use tauri::Emitter;
     let path = PathBuf::from(&dir_path);
-    local_scanner::scan_node_modules(&path)
+
+    tokio::task::spawn_blocking(move || {
+        let mut last_emit = std::time::Instant::now();
+        local_scanner::scan_node_modules_with_progress(&path, |count, pkg| {
+            // Throttle to ~20 events/sec, but always send the very first one.
+            if count == 1 || last_emit.elapsed().as_millis() >= 50 {
+                let _ = app_handle.emit(
+                    "scan-progress",
+                    ScanProgressEvent {
+                        count,
+                        current: pkg.name.clone(),
+                    },
+                );
+                last_emit = std::time::Instant::now();
+            }
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]

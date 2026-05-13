@@ -9,6 +9,16 @@ pub struct LocalPackage {
 }
 
 pub fn scan_node_modules(project_dir: &Path) -> Result<Vec<LocalPackage>, String> {
+    scan_node_modules_with_progress(project_dir, |_, _| {})
+}
+
+pub fn scan_node_modules_with_progress<F>(
+    project_dir: &Path,
+    mut on_progress: F,
+) -> Result<Vec<LocalPackage>, String>
+where
+    F: FnMut(usize, &LocalPackage),
+{
     let node_modules = if project_dir.file_name().and_then(|s| s.to_str()) == Some("node_modules") {
         project_dir.to_path_buf()
     } else {
@@ -23,11 +33,18 @@ pub fn scan_node_modules(project_dir: &Path) -> Result<Vec<LocalPackage>, String
     }
 
     let mut packages = Vec::new();
-    scan_dir(&node_modules, &mut packages)?;
+    scan_dir(&node_modules, &mut packages, &mut on_progress)?;
     Ok(packages)
 }
 
-fn scan_dir(dir: &Path, packages: &mut Vec<LocalPackage>) -> Result<(), String> {
+fn scan_dir<F>(
+    dir: &Path,
+    packages: &mut Vec<LocalPackage>,
+    on_progress: &mut F,
+) -> Result<(), String>
+where
+    F: FnMut(usize, &LocalPackage),
+{
     let entries = std::fs::read_dir(dir).map_err(|e| e.to_string())?;
 
     for entry in entries.flatten() {
@@ -39,7 +56,7 @@ fn scan_dir(dir: &Path, packages: &mut Vec<LocalPackage>) -> Result<(), String> 
         }
 
         if name.starts_with('@') {
-            scan_dir(&path, packages)?;
+            scan_dir(&path, packages, on_progress)?;
             continue;
         }
 
@@ -49,11 +66,13 @@ fn scan_dir(dir: &Path, packages: &mut Vec<LocalPackage>) -> Result<(), String> 
                 if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
                     let pkg_name = json["name"].as_str().unwrap_or(&name).to_string();
                     let version = json["version"].as_str().unwrap_or("0.0.0").to_string();
-                    packages.push(LocalPackage {
+                    let pkg = LocalPackage {
                         name: pkg_name,
                         version,
                         path: path.clone(),
-                    });
+                    };
+                    packages.push(pkg.clone());
+                    on_progress(packages.len(), &pkg);
                 }
             }
         }
