@@ -153,13 +153,16 @@ export function SearchPage() {
       return;
     }
 
-    const local = localPackageByName.get(name);
-    if (local && local.versions.length > 0) {
-      setExpanded((prev) => ({
-        ...prev,
-        [name]: { name, versions: local.versions, loading: false },
-      }));
-      return;
+    // Only use local data on verdaccio tab
+    if (source === "verdaccio") {
+      const local = localPackageByName.get(name);
+      if (local && local.versions.length > 0) {
+        setExpanded((prev) => ({
+          ...prev,
+          [name]: { name, versions: local.versions, loading: false },
+        }));
+        return;
+      }
     }
 
     setExpanded((prev) => ({
@@ -178,7 +181,7 @@ export function SearchPage() {
         [name]: { name, versions, loading: false },
       }));
     } catch {
-      const fallback = local?.cached_versions ?? [];
+      const fallback = localPackageByName.get(name)?.cached_versions ?? [];
       setExpanded((prev) => ({
         ...prev,
         [name]: { name, versions: fallback, loading: false },
