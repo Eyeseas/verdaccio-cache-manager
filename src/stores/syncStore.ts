@@ -76,12 +76,13 @@ export const useSyncStore = create<SyncStore>((set) => ({
       switch (status) {
         case "started":
           set({ status: "syncing", progress: 0, total: 0, error: null });
-          toast.loading("正在同步缓存索引...", { id: SYNC_TOAST_ID, duration: Infinity });
+          toast.loading("正在同步缓存索引...", { id: SYNC_TOAST_ID, description: undefined, duration: Infinity });
           break;
         case "fetching":
           set({ status: "syncing", progress: 0, total: 0 });
           toast.loading(message || "正在获取包列表...", {
             id: SYNC_TOAST_ID,
+            description: undefined,
             duration: Infinity,
           });
           break;
@@ -89,7 +90,7 @@ export const useSyncStore = create<SyncStore>((set) => ({
           set({ status: "syncing", progress, total });
           toast.loading(
             message || `同步缓存索引 ${progress}/${total}`,
-            { id: SYNC_TOAST_ID, duration: Infinity }
+            { id: SYNC_TOAST_ID, description: undefined, duration: Infinity }
           );
           break;
         case "done":
@@ -101,6 +102,7 @@ export const useSyncStore = create<SyncStore>((set) => ({
           });
           toast.success(`索引同步完成，共 ${total} 个包`, {
             id: SYNC_TOAST_ID,
+            description: undefined,
             duration: 3000,
           });
           useCacheStore.getState().loadCachedPackages();
