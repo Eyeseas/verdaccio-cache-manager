@@ -149,7 +149,7 @@ jobs:
           tagName: ${{ steps.tag.outputs.name }}
           releaseName: ${{ steps.tag.outputs.name }}
           releaseBody: "${{ steps.changelog.outputs.body }}"
-          releaseDraft: true
+          releaseDraft: false
           prerelease: false
           args: ${{ matrix.args }}
           assetNamePattern: ${{ matrix.assetNamePattern }}
