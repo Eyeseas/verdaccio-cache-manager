@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.1.9 (2026-05-14)
+
+### CI
+- 修复 release workflow 的 CHANGELOG 提取逻辑，并把 release 标题改为仅版本号 (9242d15)
+
 ## v0.1.8 (2026-05-14)
 
 ### Bug Fixes
