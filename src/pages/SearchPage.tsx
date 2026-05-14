@@ -22,7 +22,14 @@ import {
   ChevronDown,
   ChevronRight,
   Check,
+  PackageCheck,
+  X,
 } from "lucide-react";
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/popover";
 import { ExportDropdown } from "@/components/ExportDropdown";
 
 type SearchResult = CachedPackage;
@@ -461,9 +468,55 @@ export function SearchPage() {
 
       {totalSelected > 0 && (
         <div className="-mx-6 -mb-6 mt-4 flex items-center justify-between border-t bg-background px-6 py-3">
-          <span className="text-sm">
-            已选择 <strong>{totalSelected}</strong> 个版本
-          </span>
+          <Popover>
+            <PopoverTrigger className="flex items-center gap-2 rounded-md px-2 py-1 text-sm transition-colors hover:bg-muted">
+              <PackageCheck className="h-4 w-4" />
+              已选择 <strong>{totalSelected}</strong> 个版本
+              <ChevronDown className="h-3 w-3 text-muted-foreground" />
+            </PopoverTrigger>
+            <PopoverContent
+              align="start"
+              side="top"
+              className="w-80 p-0"
+            >
+              <div className="flex items-center justify-between border-b px-3 py-2">
+                <span className="text-sm font-medium">
+                  已选择 {totalSelected} 个版本
+                </span>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-6 px-2 text-xs text-muted-foreground"
+                  onClick={() => setSelected(new Map())}
+                >
+                  清空
+                </Button>
+              </div>
+              <div className="max-h-64 overflow-y-auto p-2">
+                {Array.from(selected.entries()).map(([pkgName, versions]) => (
+                  <div key={pkgName} className="mb-2 last:mb-0">
+                    <div className="px-1 text-xs font-medium text-muted-foreground">
+                      {pkgName}
+                    </div>
+                    <div className="mt-1 flex flex-wrap gap-1">
+                      {Array.from(versions).map((v) => (
+                        <span
+                          key={v}
+                          className="group flex items-center gap-1 rounded-md border bg-muted/50 px-2 py-0.5 text-xs"
+                        >
+                          {v}
+                          <X
+                            className="h-3 w-3 cursor-pointer text-muted-foreground opacity-0 transition-opacity hover:text-foreground group-hover:opacity-100"
+                            onClick={() => toggleVersion(pkgName, v)}
+                          />
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </PopoverContent>
+          </Popover>
           <div className="flex gap-2">
             <ExportDropdown
               getSelectedPackages={() => {

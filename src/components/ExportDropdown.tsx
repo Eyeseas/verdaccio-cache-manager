@@ -8,7 +8,7 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { Download, ChevronUp, Loader2 } from "lucide-react";
+import { Download, ChevronUp, Loader2, Box, Boxes } from "lucide-react";
 import { toast } from "sonner";
 
 interface ExportDropdownProps {
@@ -94,9 +94,11 @@ export function ExportDropdown({
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end">
         <DropdownMenuItem onClick={handleExportSelected}>
+          <Box className="h-4 w-4" />
           仅导出选中的包
         </DropdownMenuItem>
         <DropdownMenuItem onClick={handleExportWithDeps}>
+          <Boxes className="h-4 w-4" />
           导出选中的包及其依赖
         </DropdownMenuItem>
       </DropdownMenuContent>

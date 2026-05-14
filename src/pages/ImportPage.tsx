@@ -7,7 +7,12 @@ import { useTauriFileDrop } from "@/hooks/useTauriFileDrop";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Badge } from "@/components/ui/badge";
-import { FileInput, Loader2, FolderOpen } from "lucide-react";
+import { FileInput, Loader2, FolderOpen, PackageCheck, ChevronDown, X } from "lucide-react";
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/popover";
 import { ExportDropdown } from "@/components/ExportDropdown";
 
 const SUPPORTED_FILES = [
@@ -330,9 +335,54 @@ export function ImportPage() {
 
           {selected.size > 0 && (
             <div className="-mx-6 -mb-6 mt-4 flex items-center justify-between border-t bg-background px-6 py-3">
-              <span className="text-sm">
-                已选择 <strong>{selected.size}</strong> 个包
-              </span>
+              <Popover>
+                <PopoverTrigger className="flex items-center gap-2 rounded-md px-2 py-1 text-sm transition-colors hover:bg-muted">
+                  <PackageCheck className="h-4 w-4" />
+                  已选择 <strong>{selected.size}</strong> 个包
+                  <ChevronDown className="h-3 w-3 text-muted-foreground" />
+                </PopoverTrigger>
+                <PopoverContent
+                  align="start"
+                  side="top"
+                  className="w-80 p-0"
+                >
+                  <div className="flex items-center justify-between border-b px-3 py-2">
+                    <span className="text-sm font-medium">
+                      已选择 {selected.size} 个包
+                    </span>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="h-6 px-2 text-xs text-muted-foreground"
+                      onClick={() => setSelected(new Set())}
+                    >
+                      清空
+                    </Button>
+                  </div>
+                  <div className="max-h-64 overflow-y-auto p-2">
+                    {Array.from(selected).map((i) => (
+                      <div
+                        key={i}
+                        className="group flex items-center justify-between rounded-md px-2 py-1 text-sm hover:bg-muted"
+                      >
+                        <span className="min-w-0 flex-1 truncate">
+                          {deps[i].name}@{deps[i].version}
+                        </span>
+                        <X
+                          className="h-3 w-3 shrink-0 cursor-pointer text-muted-foreground opacity-0 transition-opacity hover:text-foreground group-hover:opacity-100"
+                          onClick={() =>
+                            setSelected((prev) => {
+                              const next = new Set(prev);
+                              next.delete(i);
+                              return next;
+                            })
+                          }
+                        />
+                      </div>
+                    ))}
+                  </div>
+                </PopoverContent>
+              </Popover>
               <div className="flex gap-2">
                 <ExportDropdown
                   getSelectedPackages={() =>
