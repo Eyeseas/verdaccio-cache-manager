@@ -1,7 +1,7 @@
 # Verdaccio Cache Manager
 
 <p>
-  <img alt="version" src="https://img.shields.io/badge/version-0.1.7-blue" />
+  <img alt="version" src="https://img.shields.io/badge/version-0.1.8-blue" />
   <img alt="platform" src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey" />
   <img alt="license" src="https://img.shields.io/badge/license-MIT-green" />
 </p>
@@ -37,6 +37,11 @@
 > `offline-webview2` Windows 包会内置 WebView2 离线安装器，安装包更大，适合不能联网或系统 WebView2 版本过旧的机器；普通 Windows 包保持原来的较小体积。
 
 ## 近期更新
+
+**v0.1.8**
+- 扫描 node_modules 后自动比对已缓存包，默认仅勾选未缓存项
+- 扫描页上传时显示按钮 loading 与逐包状态徽章
+- Publish 413 错误给出明确修复提示（调大 Verdaccio `max_body_size`）
 
 **v0.1.7**
 - 本地上传页支持逐包上传状态展示
