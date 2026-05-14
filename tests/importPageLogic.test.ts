@@ -135,6 +135,35 @@ describe("import page package resolution flow", () => {
     );
   });
 
+  it("keeps unresolved selected rows after caching with dependencies starts", () => {
+    const deps: ParsedDependency[] = [
+      { name: "react", version: "^19", tarball_url: null },
+      { name: "missing-package", version: "^1", tarball_url: null },
+      { name: "vite", version: "~7.0", tarball_url: null },
+    ];
+    const resolved: ResolvedImportPackage[] = [
+      {
+        name: "react",
+        raw_range: "^19",
+        version: "19.1.0",
+        tarball_url: null,
+        cached: true,
+      },
+      {
+        name: "vite",
+        raw_range: "~7.0",
+        version: "7.0.4",
+        tarball_url: null,
+        cached: false,
+      },
+    ];
+
+    assert.deepEqual(
+      removeResolvedFromSelection(new Set([0, 1, 2]), deps, resolved),
+      new Set([1])
+    );
+  });
+
   it("ignores resolve progress events from older import sessions", () => {
     const states = new Map<string, RowState>([
       [rowKey("react", "^19"), { status: "unknown" }],

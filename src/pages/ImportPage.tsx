@@ -335,7 +335,6 @@ export function ImportPage() {
       if (tasks.length > 0) {
         await startCacheTasks(tasks);
       }
-      setSelected(new Set());
     } catch (e) {
       console.error("依赖解析失败:", e);
     } finally {
