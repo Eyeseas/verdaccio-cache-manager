@@ -121,6 +121,22 @@ jobs:
             echo "publish=false" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Extract changelog for this version
+        if: steps.tag.outputs.publish == 'true'
+        id: changelog
+        shell: bash
+        run: |
+          VERSION="${{ steps.tag.outputs.name }}"
+          VERSION="${VERSION#v}"
+          BODY=$(awk "/^## v${VERSION}/,/^## v[0-9]/" CHANGELOG.md | sed '$d')
+          if [ -z "$BODY" ]; then
+            BODY="See the assets to download this version and install."
+          fi
+          EOF=$(dd if=/dev/urandom bs=15 count=1 status=none | base64)
+          echo "body<<$EOF" >> "$GITHUB_OUTPUT"
+          echo "$BODY" >> "$GITHUB_OUTPUT"
+          echo "$EOF" >> "$GITHUB_OUTPUT"
+
       - name: Build & release with tauri-action
         if: steps.tag.outputs.publish == 'true'
         uses: tauri-apps/tauri-action@v0
@@ -129,8 +145,7 @@ jobs:
         with:
           tagName: ${{ steps.tag.outputs.name }}
           releaseName: "Verdaccio Cache Manager ${{ steps.tag.outputs.name }}"
-          releaseBody: |
-            See the assets to download this version and install.
+          releaseBody: "${{ steps.changelog.outputs.body }}"
           releaseDraft: true
           prerelease: false
           args: ${{ matrix.args }}
