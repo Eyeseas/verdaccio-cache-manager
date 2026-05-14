@@ -4,6 +4,7 @@ import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { useTaskStore } from "@/stores/taskStore";
+import { useCacheStore } from "@/stores/cacheStore";
 import { useTauriFileDrop } from "@/hooks/useTauriFileDrop";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -20,6 +21,8 @@ import {
 
 const isTgzFile = (path: string) => path.toLowerCase().endsWith(".tgz");
 
+type UploadStatus = "idle" | "Pending" | "Downloading" | "Uploading" | "Success" | "Failed" | "Skipped";
+
 interface LocalPackage {
   name: string;
   version: string;
@@ -28,11 +31,25 @@ interface LocalPackage {
 
 interface PackageWithStatus extends LocalPackage {
   cached: boolean;
+  uploadStatus: UploadStatus;
+  error?: string;
 }
 
 interface ScanProgressEvent {
   count: number;
   current: string;
+}
+
+function renderScanStatusBadge(pkg: PackageWithStatus) {
+  if (pkg.uploadStatus !== "idle") return statusBadge(pkg.uploadStatus, pkg.error);
+  if (pkg.cached) {
+    return (
+      <Badge variant="outline" className="border-green-300 text-green-600">
+        已缓存
+      </Badge>
+    );
+  }
+  return <Badge variant="secondary">未缓存</Badge>;
 }
 
 export function UploadPage() {
@@ -57,15 +74,58 @@ export function UploadPage() {
 
 function ScanTab() {
   const { startCacheTasks } = useTaskStore();
+  const { cachedAll, loadCachedPackages } = useCacheStore();
 
   const [packages, setPackages] = useState<PackageWithStatus[]>([]);
   const [loading, setLoading] = useState(false);
+  const [uploading, setUploading] = useState(false);
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [dirPath, setDirPath] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [progress, setProgress] = useState<ScanProgressEvent | null>(null);
   const [query, setQuery] = useState("");
   const listRef = useRef<HTMLDivElement>(null);
+  const unlistenRef = useRef<(() => void) | null>(null);
+
+  useEffect(() => {
+    if (cachedAll.length === 0) void loadCachedPackages();
+  }, [cachedAll.length, loadCachedPackages]);
+
+  useEffect(() => {
+    return () => {
+      unlistenRef.current?.();
+      unlistenRef.current = null;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!uploading) return;
+    const terminal: UploadStatus[] = ["Success", "Failed", "Skipped"];
+    const pending = packages.some(
+      (p) => p.uploadStatus !== "idle" && !terminal.includes(p.uploadStatus)
+    );
+    const anyActive = packages.some((p) => p.uploadStatus !== "idle");
+    if (anyActive && !pending) {
+      unlistenRef.current?.();
+      unlistenRef.current = null;
+      setUploading(false);
+      void loadCachedPackages();
+    }
+  }, [packages, uploading, loadCachedPackages]);
+
+  const markCachedFromIndex = (
+    pkgs: PackageWithStatus[],
+    index: typeof cachedAll
+  ): PackageWithStatus[] => {
+    const map = new Map<string, Set<string>>();
+    for (const item of index) {
+      map.set(item.name, new Set(item.cached_versions));
+    }
+    return pkgs.map((p) => ({
+      ...p,
+      cached: map.get(p.name)?.has(p.version) ?? false,
+    }));
+  };
 
   const handleSelectDir = async () => {
     const dir = await open({ directory: true });
@@ -83,23 +143,34 @@ function ScanTab() {
     });
 
     try {
-      const scanned = await invoke<LocalPackage[]>("scan_node_modules", {
-        dirPath: dir,
-      });
+      const [scanned] = await Promise.all([
+        invoke<LocalPackage[]>("scan_node_modules", { dirPath: dir }),
+        loadCachedPackages(),
+      ]);
 
       if (scanned.length === 0) {
         setError("未在该目录下发现任何包，请确认已安装依赖");
         return;
       }
 
-      const withStatus: PackageWithStatus[] = scanned.map((pkg) => ({
+      const initial: PackageWithStatus[] = scanned.map((pkg) => ({
         ...pkg,
         cached: false,
+        uploadStatus: "idle",
       }));
+      const withStatus = markCachedFromIndex(
+        initial,
+        useCacheStore.getState().cachedAll
+      );
 
       setPackages(withStatus);
-      const allIndices = new Set<number>(withStatus.map((_, i) => i));
-      setSelected(allIndices);
+      const uncachedIndices = new Set<number>(
+        withStatus
+          .map((p, i) => ({ p, i }))
+          .filter(({ p }) => !p.cached)
+          .map(({ i }) => i)
+      );
+      setSelected(uncachedIndices);
       setQuery("");
     } catch (e) {
       console.error("扫描失败:", e);
@@ -110,6 +181,12 @@ function ScanTab() {
       setProgress(null);
     }
   };
+
+  useEffect(() => {
+    if (packages.length === 0) return;
+    setPackages((prev) => markCachedFromIndex(prev, cachedAll));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cachedAll]);
 
   const toggleSelect = (i: number) => {
     setSelected((prev) => {
@@ -147,17 +224,67 @@ function ScanTab() {
   const deselectAll = () => setSelected(new Set());
 
   const handleUpload = async () => {
-    const pkgs = Array.from(selected).map((i) => ({
+    const indices = Array.from(selected);
+    if (indices.length === 0) return;
+
+    const pkgs = indices.map((i) => ({
       package_name: packages[i].name,
       version: packages[i].version,
       tarball_url: `dir://${packages[i].path}`,
     }));
-    if (pkgs.length === 0) return;
-    await startCacheTasks(pkgs);
+
+    const selectedKeys = new Set(
+      indices.map((i) => `${packages[i].name}@${packages[i].version}`)
+    );
+
+    setUploading(true);
+    setPackages((prev) =>
+      prev.map((p) =>
+        selectedKeys.has(`${p.name}@${p.version}`)
+          ? { ...p, uploadStatus: "Pending" as UploadStatus, error: undefined }
+          : p
+      )
+    );
+
+    const unlisten = await listen<{
+      id: string;
+      package_name: string;
+      version: string;
+      status: UploadStatus;
+      error: string | null;
+    }>("task-progress", (event) => {
+      const { package_name, version, status, error } = event.payload;
+      setPackages((prev) =>
+        prev.map((p) =>
+          p.name === package_name && p.version === version
+            ? {
+                ...p,
+                uploadStatus: status,
+                error: error ?? undefined,
+                cached: status === "Success" || status === "Skipped" ? true : p.cached,
+              }
+            : p
+        )
+      );
+    });
+
+    unlistenRef.current = unlisten;
+    try {
+      await startCacheTasks(pkgs);
+    } catch (e) {
+      console.error("启动上传失败:", e);
+      unlistenRef.current?.();
+      unlistenRef.current = null;
+      setUploading(false);
+    }
     setSelected(new Set());
   };
 
   const uncachedCount = packages.filter((p) => !p.cached).length;
+  const scanUploadTotal = packages.filter((p) => p.uploadStatus !== "idle").length;
+  const scanUploadDoneCount = packages.filter((p) =>
+    ["Success", "Failed", "Skipped"].includes(p.uploadStatus)
+  ).length;
 
   if (loading) {
     return (
@@ -218,7 +345,12 @@ function ScanTab() {
           <Button variant="ghost" size="sm" onClick={deselectAll}>
             取消全选
           </Button>
-          <Button variant="outline" size="sm" onClick={handleSelectDir}>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={handleSelectDir}
+            disabled={uploading}
+          >
             重新扫描
           </Button>
         </div>
@@ -267,10 +399,11 @@ function ScanTab() {
                   }}
                   className="flex items-center gap-3 border-b px-4 py-2"
                 >
-                  {!pkg.cached ? (
+                  {!pkg.cached && pkg.uploadStatus === "idle" ? (
                     <Checkbox
                       checked={selected.has(idx)}
                       onCheckedChange={() => toggleSelect(idx)}
+                      disabled={uploading}
                     />
                   ) : (
                     <span className="h-4 w-4" />
@@ -281,16 +414,7 @@ function ScanTab() {
                   <span className="text-sm text-muted-foreground">
                     {pkg.version}
                   </span>
-                  {pkg.cached ? (
-                    <Badge
-                      variant="outline"
-                      className="border-green-300 text-green-600"
-                    >
-                      已缓存
-                    </Badge>
-                  ) : (
-                    <Badge variant="secondary">未缓存</Badge>
-                  )}
+                  {renderScanStatusBadge(pkg)}
                 </div>
               );
             })}
@@ -298,8 +422,14 @@ function ScanTab() {
         )}
       </div>
 
-      {selected.size > 0 && (
+      {(selected.size > 0 || uploading) && (
         <div className="mt-4 flex items-center justify-between rounded-lg border bg-muted/30 p-3">
+          {uploading ? (
+            <span className="flex items-center gap-2 px-2 py-1 text-sm">
+              <Loader2 className="h-4 w-4 animate-spin" />
+              上传中... 已完成 {scanUploadDoneCount}/{scanUploadTotal}
+            </span>
+          ) : (
           <Popover>
             <PopoverTrigger className="flex items-center gap-2 rounded-md px-2 py-1 text-sm transition-colors hover:bg-muted">
               <PackageCheck className="h-4 w-4" />
@@ -348,14 +478,22 @@ function ScanTab() {
               </div>
             </PopoverContent>
           </Popover>
-          <Button onClick={handleUpload}>上传到私服</Button>
+          )}
+          <Button onClick={handleUpload} disabled={uploading || selected.size === 0}>
+            {uploading ? (
+              <>
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                上传中...
+              </>
+            ) : (
+              "上传到私服"
+            )}
+          </Button>
         </div>
       )}
     </div>
   );
 }
-
-type UploadStatus = "idle" | "Pending" | "Downloading" | "Uploading" | "Success" | "Failed" | "Skipped";
 
 interface TgzFileWithStatus extends LocalPackage {
   uploadStatus: UploadStatus;
