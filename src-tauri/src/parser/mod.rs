@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::Arc;
+use tokio::sync::{Mutex, Semaphore};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ParsedDependency {
@@ -36,29 +38,27 @@ pub fn parse_package_json(content: &str) -> Result<Vec<ParsedDependency>, String
 
 fn clean_semver_range(raw: &str) -> Option<String> {
     let trimmed = raw.trim();
-    if trimmed.is_empty() || trimmed == "*" || trimmed == "latest" || trimmed.contains("||") {
+    if trimmed.is_empty() || trimmed == "*" || trimmed == "latest" {
         return None;
     }
-    // Strip leading range operators: ^, ~, >=, >, <=, <, =
-    let v = trimmed
-        .trim_start_matches(">=")
-        .trim_start_matches("<=")
-        .trim_start_matches('>')
-        .trim_start_matches('<')
-        .trim_start_matches('~')
-        .trim_start_matches('^')
-        .trim_start_matches('=')
-        .trim();
-    // Take only the first space-separated token (handles ">=1.0.0 <2.0.0")
-    let v = v.split_whitespace().next().unwrap_or(v);
-    // Must start with a digit to be a valid version
-    if v.is_empty() || !v.chars().next().map_or(false, |c| c.is_ascii_digit()) {
-        return None;
+    // Reject non-semver specifiers (git/file/url/workspace/link/npm alias)
+    let lower = trimmed.to_ascii_lowercase();
+    for proto in [
+        "git+", "git:", "git@", "http://", "https://", "file:", "link:", "workspace:", "npm:",
+    ] {
+        if lower.starts_with(proto) {
+            return None;
+        }
     }
-    // Skip versions containing 'x' or '*' wildcards like "1.x" or "1.0.*"
-    if v.contains('x') || v.contains('*') {
-        return None;
-    }
+    // Keep raw range intact (e.g. "^9", "~5.1", ">=1.0.0 <2.0.0", "1.2.3").
+    // Concrete pinning vs. range resolution is decided in resolve_version_ranges.
+    Some(trimmed.to_string())
+}
+
+/// Returns Some(version) when the input is already a concrete x.y.z version
+/// that doesn't need registry lookup.
+pub fn pinned_version(raw: &str) -> Option<String> {
+    let v = node_semver::Version::parse(raw).ok()?;
     Some(v.to_string())
 }
 
@@ -230,4 +230,95 @@ pub fn detect_and_parse(file_path: &Path) -> Result<Vec<ParsedDependency>, Strin
         "package-lock.json" => parse_package_lock(&content),
         _ => Err(format!("不支持的文件类型: {}", filename)),
     }
+}
+
+/// Resolves raw semver ranges in dependency entries to concrete versions by
+/// querying the npm registry. Already-pinned x.y.z versions short-circuit.
+/// Entries whose range can't be satisfied are dropped silently.
+pub async fn resolve_version_ranges(deps: Vec<ParsedDependency>) -> Vec<ParsedDependency> {
+    let http = reqwest::Client::new();
+    let sem = Arc::new(Semaphore::new(10));
+    let versions_cache: Arc<Mutex<HashMap<String, Arc<Vec<String>>>>> =
+        Arc::new(Mutex::new(HashMap::new()));
+
+    let mut handles = Vec::with_capacity(deps.len());
+    for dep in deps {
+        let http = http.clone();
+        let sem = sem.clone();
+        let cache = versions_cache.clone();
+        handles.push(tokio::spawn(async move {
+            // Short-circuit: already a concrete x.y.z version.
+            if let Some(v) = pinned_version(&dep.version) {
+                return Some(ParsedDependency {
+                    name: dep.name,
+                    version: v,
+                    tarball_url: dep.tarball_url,
+                });
+            }
+
+            let versions = {
+                let map = cache.lock().await;
+                map.get(&dep.name).cloned()
+            };
+            let versions = match versions {
+                Some(v) => v,
+                None => {
+                    let fetched = fetch_versions(&http, &sem, &dep.name).await.ok()?;
+                    let arc = Arc::new(fetched);
+                    cache.lock().await.insert(dep.name.clone(), arc.clone());
+                    arc
+                }
+            };
+
+            let resolved = resolve_max_satisfying(&dep.version, &versions)?;
+            Some(ParsedDependency {
+                name: dep.name,
+                version: resolved,
+                tarball_url: dep.tarball_url,
+            })
+        }));
+    }
+
+    let mut out = Vec::with_capacity(handles.len());
+    for h in handles {
+        if let Ok(Some(dep)) = h.await {
+            out.push(dep);
+        }
+    }
+    out
+}
+
+pub async fn fetch_versions(
+    http: &reqwest::Client,
+    sem: &Arc<Semaphore>,
+    name: &str,
+) -> Result<Vec<String>, String> {
+    let _permit = sem.acquire().await.map_err(|e| e.to_string())?;
+    let url = format!("https://registry.npmjs.org/{}", name);
+    let resp = http
+        .get(&url)
+        .header("accept", "application/json")
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("HTTP {}", resp.status()));
+    }
+    let body: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    let versions = body["versions"]
+        .as_object()
+        .map(|v| v.keys().cloned().collect())
+        .unwrap_or_default();
+    Ok(versions)
+}
+
+pub fn resolve_max_satisfying(range_str: &str, available: &[String]) -> Option<String> {
+    let range = node_semver::Range::parse(range_str).ok()?;
+    let mut matching: Vec<node_semver::Version> = available
+        .iter()
+        .filter_map(|v| node_semver::Version::parse(v).ok())
+        .filter(|v| range.satisfies(v))
+        .collect();
+    matching.sort();
+    matching.last().map(|v| v.to_string())
 }

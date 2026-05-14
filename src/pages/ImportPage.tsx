@@ -1,6 +1,7 @@
-import { useState, useCallback, useRef, useEffect, useMemo } from "react";
+import { useState, useCallback, useRef, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { useTaskStore } from "@/stores/taskStore";
 import { useTauriFileDrop } from "@/hooks/useTauriFileDrop";
@@ -37,43 +38,149 @@ interface CachedStatus {
   cached: boolean;
 }
 
-interface DependencyWithStatus extends ParsedDependency {
-  cached: boolean | undefined;
+type RowStatus =
+  | "unknown"
+  | "cached"
+  | "uncached"
+  | "resolving"
+  | "resolve-failed"
+  | "downloading"
+  | "uploading"
+  | "failed";
+
+interface RowState {
+  status: RowStatus;
+  resolvedVersion?: string;
+  error?: string;
 }
+
+interface ResolveProgressPayload {
+  name: string;
+  raw_range: string;
+  resolved_version: string | null;
+  cached: boolean;
+  error: string | null;
+}
+
+type TaskStatusEnum =
+  | "Pending"
+  | "Downloading"
+  | "Uploading"
+  | "Success"
+  | "Failed"
+  | "Skipped";
+
+interface TaskProgressPayload {
+  id: string;
+  package_name: string;
+  version: string;
+  status: TaskStatusEnum;
+  error: string | null;
+}
+
+const rowKey = (name: string, rawRange: string) => `${name}::${rawRange}`;
 
 export function ImportPage() {
   const { startCacheTasks, resolveDependencies } = useTaskStore();
 
   const [parsedDeps, setParsedDeps] = useState<ParsedDependency[]>([]);
-  const [cachedMap, setCachedMap] = useState<Map<string, Set<string>>>(
-    new Map()
-  );
+  const [rowStates, setRowStates] = useState<Map<string, RowState>>(new Map());
   const [checking, setChecking] = useState(false);
   const [loading, setLoading] = useState(false);
   const [fileName, setFileName] = useState<string | null>(null);
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [error, setError] = useState<string | null>(null);
   const [resolving, setResolving] = useState(false);
+  const [caching, setCaching] = useState(false);
   const dropZoneRef = useRef<HTMLDivElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
-
-  const deps: DependencyWithStatus[] = useMemo(
-    () =>
-      parsedDeps.map((dep) => ({
-        ...dep,
-        cached: checking
-          ? undefined
-          : (cachedMap.get(dep.name)?.has(dep.version) ?? false),
-      })),
-    [parsedDeps, cachedMap, checking]
-  );
+  const pendingInitSelectionRef = useRef(false);
 
   const rowVirtualizer = useVirtualizer({
-    count: deps.length,
+    count: parsedDeps.length,
     getScrollElement: () => listRef.current,
     estimateSize: () => 37,
     overscan: 12,
   });
+
+  useEffect(() => {
+    let stopped = false;
+    const handles: UnlistenFn[] = [];
+
+    listen<ResolveProgressPayload>("import-resolve-progress", (event) => {
+      if (stopped) return;
+      const p = event.payload;
+      const key = rowKey(p.name, p.raw_range);
+      setRowStates((prev) => {
+        const next = new Map(prev);
+        const cur = next.get(key) ?? { status: "unknown" };
+        if (p.error) {
+          next.set(key, {
+            ...cur,
+            status: "resolve-failed",
+            error: p.error,
+            resolvedVersion: p.resolved_version ?? cur.resolvedVersion,
+          });
+        } else if (p.cached) {
+          next.set(key, {
+            ...cur,
+            status: "cached",
+            resolvedVersion: p.resolved_version ?? cur.resolvedVersion,
+          });
+        } else {
+          next.set(key, {
+            ...cur,
+            status: "uncached",
+            resolvedVersion: p.resolved_version ?? cur.resolvedVersion,
+          });
+        }
+        return next;
+      });
+    }).then((un) => handles.push(un));
+
+    listen<TaskProgressPayload>("task-progress", (event) => {
+      if (stopped) return;
+      const p = event.payload;
+      setRowStates((prev) => {
+        let changed = false;
+        const next = new Map(prev);
+        for (const [k, state] of next) {
+          if (state.resolvedVersion !== p.version) continue;
+          const sep = k.lastIndexOf("::");
+          const n = sep === -1 ? k : k.slice(0, sep);
+          if (n !== p.package_name) continue;
+          let status: RowStatus = state.status;
+          switch (p.status) {
+            case "Downloading":
+              status = "downloading";
+              break;
+            case "Uploading":
+              status = "uploading";
+              break;
+            case "Success":
+            case "Skipped":
+              status = "cached";
+              break;
+            case "Failed":
+              status = "failed";
+              break;
+            default:
+              break;
+          }
+          if (status !== state.status || state.error !== (p.error ?? undefined)) {
+            next.set(k, { ...state, status, error: p.error ?? undefined });
+            changed = true;
+          }
+        }
+        return changed ? next : prev;
+      });
+    }).then((un) => handles.push(un));
+
+    return () => {
+      stopped = true;
+      handles.forEach((fn) => fn());
+    };
+  }, []);
 
   const checkCachedStatus = useCallback(async (parsed: ParsedDependency[]) => {
     setChecking(true);
@@ -82,16 +189,17 @@ export function ImportPage() {
       const results = await invoke<CachedStatus[]>("check_cached_status", {
         packages: pairs,
       });
-      const map = new Map<string, Set<string>>();
-      for (const r of results) {
-        if (r.cached) {
-          if (!map.has(r.name)) map.set(r.name, new Set());
-          map.get(r.name)!.add(r.version);
+      setRowStates((prev) => {
+        const next = new Map(prev);
+        for (const r of results) {
+          const key = rowKey(r.name, r.version);
+          const cur = next.get(key) ?? { status: "unknown" };
+          next.set(key, { ...cur, status: r.cached ? "cached" : "uncached" });
         }
-      }
-      setCachedMap(map);
+        return next;
+      });
     } catch (_) {
-      setCachedMap(new Map());
+      // ignore
     } finally {
       setChecking(false);
     }
@@ -116,7 +224,7 @@ export function ImportPage() {
       setLoading(true);
       setParsedDeps([]);
       setSelected(new Set());
-      setCachedMap(new Map());
+      setRowStates(new Map());
       setError(null);
       setFileName(filePath.split("/").pop() || filePath);
 
@@ -131,6 +239,12 @@ export function ImportPage() {
           return;
         }
 
+        const init = new Map<string, RowState>();
+        for (const dep of parsed) {
+          init.set(rowKey(dep.name, dep.version), { status: "unknown" });
+        }
+        setRowStates(init);
+        pendingInitSelectionRef.current = true;
         setParsedDeps(parsed);
         checkCachedStatus(parsed);
       } catch (e) {
@@ -143,13 +257,20 @@ export function ImportPage() {
   );
 
   useEffect(() => {
-    if (deps.length === 0 || checking) return;
-    const uncached = new Set<number>();
-    deps.forEach((d, i) => {
-      if (!d.cached) uncached.add(i);
+    if (
+      !pendingInitSelectionRef.current ||
+      parsedDeps.length === 0 ||
+      checking
+    )
+      return;
+    const sel = new Set<number>();
+    parsedDeps.forEach((d, i) => {
+      const s = rowStates.get(rowKey(d.name, d.version))?.status;
+      if (s !== "cached") sel.add(i);
     });
-    setSelected(uncached);
-  }, [deps, checking]);
+    setSelected(sel);
+    pendingInitSelectionRef.current = false;
+  }, [parsedDeps, rowStates, checking]);
 
   const toggleSelect = (index: number) => {
     setSelected((prev) => {
@@ -164,35 +285,87 @@ export function ImportPage() {
   };
 
   const selectAllUncached = () => {
-    const uncached = new Set<number>();
-    deps.forEach((d, i) => {
-      if (!d.cached) uncached.add(i);
+    const sel = new Set<number>();
+    parsedDeps.forEach((d, i) => {
+      const s = rowStates.get(rowKey(d.name, d.version))?.status;
+      if (s !== "cached") sel.add(i);
     });
-    setSelected(uncached);
+    setSelected(sel);
   };
 
   const deselectAll = () => setSelected(new Set());
 
+  const markRowsResolving = (indices: number[]) => {
+    setRowStates((prev) => {
+      const next = new Map(prev);
+      for (const i of indices) {
+        const dep = parsedDeps[i];
+        if (!dep) continue;
+        const key = rowKey(dep.name, dep.version);
+        const cur = next.get(key) ?? { status: "unknown" };
+        next.set(key, { ...cur, status: "resolving", error: undefined });
+      }
+      return next;
+    });
+  };
+
   const handleCache = async () => {
-    const packages = Array.from(selected).map((i) => ({
-      package_name: deps[i].name,
-      version: deps[i].version,
-      tarball_url: deps[i].tarball_url || undefined,
+    if (selected.size === 0) return;
+    const indices = Array.from(selected);
+    const inputs = indices.map((i) => ({
+      package_name: parsedDeps[i].name,
+      version: parsedDeps[i].version,
+      tarball_url: parsedDeps[i].tarball_url || undefined,
     }));
-    if (packages.length === 0) return;
-    await startCacheTasks(packages);
-    setSelected(new Set());
+    if (inputs.length === 0) return;
+
+    markRowsResolving(indices);
+    setCaching(true);
+    try {
+      const resolved = await invoke<ParsedDependency[]>(
+        "resolve_package_versions",
+        { packages: inputs }
+      );
+      if (resolved.length === 0) return;
+      await startCacheTasks(
+        resolved.map((r) => ({
+          package_name: r.name,
+          version: r.version,
+          tarball_url: r.tarball_url || undefined,
+        }))
+      );
+      setSelected(new Set());
+    } catch (e) {
+      console.error("版本解析失败:", e);
+    } finally {
+      setCaching(false);
+    }
   };
 
   const handleCacheWithDeps = async () => {
-    const packages = Array.from(selected).map((i) => ({
-      package_name: deps[i].name,
-      version: deps[i].version,
+    if (selected.size === 0) return;
+    const indices = Array.from(selected);
+    const inputs = indices.map((i) => ({
+      package_name: parsedDeps[i].name,
+      version: parsedDeps[i].version,
+      tarball_url: parsedDeps[i].tarball_url || undefined,
     }));
-    if (packages.length === 0) return;
+    if (inputs.length === 0) return;
+
+    markRowsResolving(indices);
     setResolving(true);
     try {
-      const resolved = await resolveDependencies(packages);
+      const directlyResolved = await invoke<ParsedDependency[]>(
+        "resolve_package_versions",
+        { packages: inputs }
+      );
+      if (directlyResolved.length === 0) return;
+      const resolved = await resolveDependencies(
+        directlyResolved.map((p) => ({
+          package_name: p.name,
+          version: p.version,
+        }))
+      );
       await startCacheTasks(
         resolved.map((r) => ({ package_name: r.package_name, version: r.version }))
       );
@@ -204,11 +377,91 @@ export function ImportPage() {
     }
   };
 
-  const uncachedCount = deps.filter((d) => d.cached === false).length;
+  const getState = (dep: ParsedDependency): RowState =>
+    rowStates.get(rowKey(dep.name, dep.version)) ?? { status: "unknown" };
+
+  const uncachedCount = parsedDeps.filter(
+    (d) => getState(d).status !== "cached"
+  ).length;
+
+  const renderBadge = (state: RowState) => {
+    switch (state.status) {
+      case "unknown":
+        return (
+          <Badge variant="secondary" className="animate-pulse">
+            检查中
+          </Badge>
+        );
+      case "cached":
+        return (
+          <Badge
+            variant="outline"
+            className="border-green-300 text-green-600"
+          >
+            已缓存
+          </Badge>
+        );
+      case "uncached":
+        return <Badge variant="secondary">未缓存</Badge>;
+      case "resolving":
+        return (
+          <Badge variant="secondary" className="animate-pulse">
+            解析中
+          </Badge>
+        );
+      case "resolve-failed":
+        return (
+          <Badge
+            variant="outline"
+            className="border-red-300 text-red-600"
+            title={state.error}
+          >
+            解析失败
+          </Badge>
+        );
+      case "downloading":
+        return (
+          <Badge variant="secondary" className="animate-pulse">
+            下载中
+          </Badge>
+        );
+      case "uploading":
+        return (
+          <Badge variant="secondary" className="animate-pulse">
+            上传中
+          </Badge>
+        );
+      case "failed":
+        return (
+          <Badge
+            variant="outline"
+            className="border-red-300 text-red-600"
+            title={state.error}
+          >
+            失败
+          </Badge>
+        );
+    }
+  };
+
+  const renderVersion = (dep: ParsedDependency, state: RowState) => {
+    if (state.resolvedVersion && state.resolvedVersion !== dep.version) {
+      return (
+        <span className="text-sm text-muted-foreground">
+          <span>{dep.version}</span>
+          <span className="mx-1 opacity-60">→</span>
+          <span className="text-foreground/80">{state.resolvedVersion}</span>
+        </span>
+      );
+    }
+    return (
+      <span className="text-sm text-muted-foreground">{dep.version}</span>
+    );
+  };
 
   const { isOver: dropIsOver } = useTauriFileDrop({
     zoneRef: dropZoneRef,
-    enabled: deps.length === 0 && !loading,
+    enabled: parsedDeps.length === 0 && !loading,
     filter: isDependencyFile,
     onDrop: async (paths) => {
       if (paths[0]) await parseFile(paths[0]);
@@ -219,7 +472,7 @@ export function ImportPage() {
     <div className="flex h-full flex-col p-6">
       <h1 className="mb-4 text-2xl font-bold">导入</h1>
 
-      {deps.length === 0 && !loading && (
+      {parsedDeps.length === 0 && !loading && (
         <div
           ref={dropZoneRef}
           className={`flex flex-1 flex-col items-center justify-center rounded-lg border-2 border-dashed p-12 text-center transition-colors ${
@@ -227,15 +480,11 @@ export function ImportPage() {
           }`}
         >
           <FileInput className="mb-4 h-12 w-12 text-muted-foreground" />
-          <p className="mb-2 text-lg font-medium">
-            拖入文件或点击选择
-          </p>
+          <p className="mb-2 text-lg font-medium">拖入文件或点击选择</p>
           <p className="mb-4 text-sm text-muted-foreground">
             支持 package.json、pnpm-lock.yaml、package-lock.json
           </p>
-          {error && (
-            <p className="mb-4 text-sm text-destructive">{error}</p>
-          )}
+          {error && <p className="mb-4 text-sm text-destructive">{error}</p>}
           <Button variant="outline" onClick={handleSelectFile}>
             <FolderOpen className="mr-2 h-4 w-4" />
             选择文件
@@ -250,13 +499,13 @@ export function ImportPage() {
         </div>
       )}
 
-      {deps.length > 0 && !loading && (
+      {parsedDeps.length > 0 && !loading && (
         <>
           <div className="mb-3 flex items-center justify-between">
             <div className="flex items-center gap-3">
               <Badge variant="outline">{fileName}</Badge>
               <span className="text-sm text-muted-foreground">
-                共 {deps.length} 个依赖，{uncachedCount} 个未缓存
+                共 {parsedDeps.length} 个依赖，{uncachedCount} 个未缓存
               </span>
             </div>
             <div className="flex gap-2">
@@ -284,7 +533,13 @@ export function ImportPage() {
             >
               {rowVirtualizer.getVirtualItems().map((row) => {
                 const i = row.index;
-                const dep = deps[i];
+                const dep = parsedDeps[i];
+                const state = getState(dep);
+                const selectable =
+                  state.status !== "cached" &&
+                  state.status !== "downloading" &&
+                  state.status !== "uploading" &&
+                  state.status !== "resolving";
                 return (
                   <div
                     key={`${dep.name}@${dep.version}-${i}`}
@@ -299,7 +554,7 @@ export function ImportPage() {
                     }}
                     className="flex items-center gap-3 border-b px-4 py-2"
                   >
-                    {!dep.cached && dep.cached !== undefined ? (
+                    {selectable ? (
                       <Checkbox
                         checked={selected.has(i)}
                         onCheckedChange={() => toggleSelect(i)}
@@ -310,23 +565,8 @@ export function ImportPage() {
                     <span className="min-w-0 flex-1 truncate font-mono text-sm">
                       {dep.name}
                     </span>
-                    <span className="text-sm text-muted-foreground">
-                      {dep.version}
-                    </span>
-                    {dep.cached === undefined ? (
-                      <Badge variant="secondary" className="animate-pulse">
-                        检查中
-                      </Badge>
-                    ) : dep.cached ? (
-                      <Badge
-                        variant="outline"
-                        className="border-green-300 text-green-600"
-                      >
-                        已缓存
-                      </Badge>
-                    ) : (
-                      <Badge variant="secondary">未缓存</Badge>
-                    )}
+                    {renderVersion(dep, state)}
+                    {renderBadge(state)}
                   </div>
                 );
               })}
@@ -366,7 +606,7 @@ export function ImportPage() {
                         className="group flex items-center justify-between rounded-md px-2 py-1 text-sm hover:bg-muted"
                       >
                         <span className="min-w-0 flex-1 truncate">
-                          {deps[i].name}@{deps[i].version}
+                          {parsedDeps[i].name}@{parsedDeps[i].version}
                         </span>
                         <X
                           className="h-3 w-3 shrink-0 cursor-pointer text-muted-foreground opacity-0 transition-opacity hover:text-foreground group-hover:opacity-100"
@@ -386,16 +626,20 @@ export function ImportPage() {
               <div className="flex gap-2">
                 <ExportDropdown
                   getSelectedPackages={() =>
-                    Array.from(selected).map((i) => ({
-                      package_name: deps[i].name,
-                      version: deps[i].version,
-                    }))
+                    Array.from(selected).map((i) => {
+                      const dep = parsedDeps[i];
+                      const state = getState(dep);
+                      return {
+                        package_name: dep.name,
+                        version: state.resolvedVersion ?? dep.version,
+                      };
+                    })
                   }
                 />
                 <Button
                   variant="outline"
                   onClick={handleCacheWithDeps}
-                  disabled={resolving}
+                  disabled={resolving || caching}
                 >
                   {resolving ? (
                     <>
@@ -406,7 +650,16 @@ export function ImportPage() {
                     "缓存包及依赖"
                   )}
                 </Button>
-                <Button onClick={handleCache}>缓存到私服</Button>
+                <Button onClick={handleCache} disabled={resolving || caching}>
+                  {caching ? (
+                    <>
+                      <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                      处理中...
+                    </>
+                  ) : (
+                    "缓存到私服"
+                  )}
+                </Button>
               </div>
             </div>
           )}

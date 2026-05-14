@@ -224,6 +224,115 @@ async fn parse_file(file_path: String) -> Result<Vec<ParsedDependency>, String> 
     parser::detect_and_parse(&path)
 }
 
+#[derive(serde::Serialize, Clone)]
+struct ResolveProgressEvent {
+    name: String,
+    raw_range: String,
+    resolved_version: Option<String>,
+    cached: bool,
+    error: Option<String>,
+}
+
+#[tauri::command]
+async fn resolve_package_versions(
+    app_handle: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    packages: Vec<CacheRequest>,
+) -> Result<Vec<ParsedDependency>, String> {
+    use std::collections::HashMap;
+    use tauri::Emitter;
+    use tokio::sync::Semaphore;
+
+    let http = reqwest::Client::new();
+    let sem = Arc::new(Semaphore::new(10));
+    let versions_cache: Arc<Mutex<HashMap<String, Arc<Vec<String>>>>> =
+        Arc::new(Mutex::new(HashMap::new()));
+    let db = state.cache_db.clone();
+
+    let mut handles = Vec::with_capacity(packages.len());
+    for pkg in packages {
+        let http = http.clone();
+        let sem = sem.clone();
+        let cache = versions_cache.clone();
+        let app = app_handle.clone();
+        let db = db.clone();
+
+        handles.push(tokio::spawn(async move {
+            let name = pkg.package_name.clone();
+            let raw_range = pkg.version.clone();
+
+            let resolved = if let Some(v) = parser::pinned_version(&raw_range) {
+                Some(v)
+            } else {
+                let versions = {
+                    let map = cache.lock().await;
+                    map.get(&name).cloned()
+                };
+                let versions = match versions {
+                    Some(v) => Some(v),
+                    None => match parser::fetch_versions(&http, &sem, &name).await {
+                        Ok(v) => {
+                            let arc = Arc::new(v);
+                            cache.lock().await.insert(name.clone(), arc.clone());
+                            Some(arc)
+                        }
+                        Err(_) => None,
+                    },
+                };
+                versions.and_then(|vs| parser::resolve_max_satisfying(&raw_range, &vs))
+            };
+
+            let cached = if let Some(ref v) = resolved {
+                let db_lock = db.lock().await;
+                db_lock
+                    .check_cached(&[(name.clone(), v.clone())])
+                    .ok()
+                    .and_then(|r| r.first().map(|s| s.cached))
+                    .unwrap_or(false)
+            } else {
+                false
+            };
+
+            let error = if resolved.is_none() {
+                Some("无法解析版本".to_string())
+            } else {
+                None
+            };
+
+            let _ = app.emit(
+                "import-resolve-progress",
+                ResolveProgressEvent {
+                    name: name.clone(),
+                    raw_range: raw_range.clone(),
+                    resolved_version: resolved.clone(),
+                    cached,
+                    error,
+                },
+            );
+
+            resolved.and_then(|v| {
+                if cached {
+                    None
+                } else {
+                    Some(ParsedDependency {
+                        name,
+                        version: v,
+                        tarball_url: pkg.tarball_url,
+                    })
+                }
+            })
+        }));
+    }
+
+    let mut out = Vec::new();
+    for h in handles {
+        if let Ok(Some(dep)) = h.await {
+            out.push(dep);
+        }
+    }
+    Ok(out)
+}
+
 #[tauri::command]
 async fn resolve_dependencies(packages: Vec<CacheRequest>) -> Result<Vec<ResolvedDep>, String> {
     let initial: Vec<(String, String)> = packages
@@ -526,6 +635,7 @@ pub fn run() {
             retry_failed_tasks,
             clear_completed_tasks,
             parse_file,
+            resolve_package_versions,
             resolve_dependencies,
             scan_node_modules,
             parse_tgz,
