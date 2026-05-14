@@ -273,6 +273,12 @@ impl RegistryClient {
             Ok(())
         } else {
             let status = resp.status();
+            if status.as_u16() == 413 {
+                return Err(format!(
+                    "包体积超出 Verdaccio 限制（413 Payload Too Large）。请在服务端 config.yaml 中将 max_body_size 调大（建议 100mb）后重启 Verdaccio。当前包：{}@{}",
+                    name, version
+                ));
+            }
             let text = resp.text().await.unwrap_or_default();
             Err(format!("Publish 失败 ({}): {}", status, text))
         }
