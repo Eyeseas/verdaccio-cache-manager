@@ -67,6 +67,12 @@ export const isSelectableState = (status: RowStatus) =>
   status !== "uploading" &&
   status !== "resolving";
 
+export const shouldShowActionBar = (state: {
+  selectedSize: number;
+  resolving: boolean;
+  caching: boolean;
+}) => state.selectedSize > 0 || state.resolving || state.caching;
+
 export const getRowState = (
   states: Map<string, RowState>,
   dep: ParsedDependency

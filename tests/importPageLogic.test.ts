@@ -11,6 +11,7 @@ import {
   pruneSelection,
   removeResolvedFromSelection,
   rowKey,
+  shouldShowActionBar,
   type ParsedDependency,
   type ResolvedImportPackage,
   type RowState,
@@ -96,6 +97,21 @@ describe("import page package resolution flow", () => {
   it("compares selections by value", () => {
     assert.equal(areSelectionsEqual(new Set([2, 1]), new Set([1, 2])), true);
     assert.equal(areSelectionsEqual(new Set([1]), new Set([1, 2])), false);
+  });
+
+  it("keeps the action bar visible while cache actions are running", () => {
+    assert.equal(
+      shouldShowActionBar({ selectedSize: 0, resolving: true, caching: false }),
+      true
+    );
+    assert.equal(
+      shouldShowActionBar({ selectedSize: 0, resolving: false, caching: true }),
+      true
+    );
+    assert.equal(
+      shouldShowActionBar({ selectedSize: 0, resolving: false, caching: false }),
+      false
+    );
   });
 
   it("clears successfully resolved selected rows even when no cache task starts", () => {

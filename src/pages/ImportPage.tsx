@@ -30,6 +30,7 @@ import {
   pruneSelection,
   removeResolvedFromSelection,
   rowKey,
+  shouldShowActionBar,
   type ParsedDependency,
   type ResolveProgressPayload,
   type ResolvedImportPackage,
@@ -348,6 +349,11 @@ export function ImportPage() {
   const uncachedCount = parsedDeps.filter(
     (d) => getState(d).status !== "cached"
   ).length;
+  const showActionBar = shouldShowActionBar({
+    selectedSize: selected.size,
+    resolving,
+    caching,
+  });
 
   const renderBadge = (state: RowState) => {
     switch (state.status) {
@@ -534,7 +540,7 @@ export function ImportPage() {
             </div>
           </div>
 
-          {selected.size > 0 && (
+          {showActionBar && (
             <div className="-mx-6 -mb-6 mt-4 flex items-center justify-between border-t bg-background px-6 py-3">
               <Popover>
                 <PopoverTrigger className="flex items-center gap-2 rounded-md px-2 py-1 text-sm transition-colors hover:bg-muted">
