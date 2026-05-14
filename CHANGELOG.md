@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.1.8 (2026-05-14)
+
+### Bug Fixes
+- Publish 失败 413 返回明确修复提示（建议调大 Verdaccio `max_body_size`） (aeb7126)
+
+### UI
+- 扫描 node_modules 后自动比对已缓存包，默认仅勾选未缓存项；上传时按钮显示 loading、逐包展示状态徽章 (d59d3e5)
+
 ## v0.1.7 (2026-05-14)
 
 ### Bug Fixes
