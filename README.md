@@ -1,7 +1,7 @@
 # Verdaccio Cache Manager
 
 <p>
-  <img alt="version" src="https://img.shields.io/badge/version-0.1.6-blue" />
+  <img alt="version" src="https://img.shields.io/badge/version-0.1.7-blue" />
   <img alt="platform" src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey" />
   <img alt="license" src="https://img.shields.io/badge/license-MIT-green" />
 </p>
@@ -38,7 +38,7 @@
 
 ## 近期更新
 
-**v0.1.6**
+**v0.1.7**
 - 本地上传页支持逐包上传状态展示
 
 **v0.1.5**
