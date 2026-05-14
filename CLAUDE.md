@@ -22,18 +22,19 @@ pnpm tsc --noEmit     # 类型检查
 
 ### 1. 升级版本号
 
-同步修改以下三处版本号，保持一致：
+同步修改以下四处版本号，保持一致：
 
 - `package.json` → `"version"`
 - `src-tauri/tauri.conf.json` → `"version"`
 - `src-tauri/Cargo.toml` → `version`
+- `README.md` → version badge
 
 运行 `cargo update -p verdaccio-cache-manager` 或让 Cargo.lock 自动更新。
 
 ### 2. 提交版本变更
 
 ```bash
-git add package.json src-tauri/tauri.conf.json src-tauri/Cargo.toml src-tauri/Cargo.lock
+git add package.json src-tauri/tauri.conf.json src-tauri/Cargo.toml src-tauri/Cargo.lock README.md
 git commit -m "chore: bump version to <version>"
 ```
 
@@ -74,15 +75,14 @@ git commit -m "docs: update changelog for v<version>"
 ### 4. 打 Tag 并推送
 
 ```bash
-git tag v<version>
-git push origin main v<version>
+git push origin main          # 先推 main，确认与远程一致
+git tag v<version>            # 在当前 HEAD 打 tag
+git push origin v<version>
 ```
 
 Tag 格式必须为 `v` + 语义化版本号（如 `v0.1.6`），推送后 GitHub Actions 自动触发多平台构建和 Release 草稿。
 
-### 5. 更新 README 版本徽章
-
-确保 `README.md` 中的 version badge 与新版本一致。
+⚠️ **关键约束**：tag 必须打在 `origin/main` HEAD 上。如果打 tag 后再向 main push 任何 commit，重跑 release workflow 会因 GitHub API 限制（`target_commitish` 非 default branch HEAD 时 `GITHUB_TOKEN` 无法创建 release，返回 403 "Resource not accessible by integration"）而失败。如需追加变更，请走下一个 patch 版本。
 
 ## 代码规范
 
