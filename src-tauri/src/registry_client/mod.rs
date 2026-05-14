@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use tokio::sync::OnceCell;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PackageInfo {
@@ -21,7 +22,7 @@ pub struct SearchResult {
 pub struct RegistryClient {
     http: reqwest::Client,
     pub registry_url: String,
-    token: Option<String>,
+    token: OnceCell<String>,
 }
 
 impl RegistryClient {
@@ -29,42 +30,48 @@ impl RegistryClient {
         Self {
             http: reqwest::Client::new(),
             registry_url: registry_url.to_string(),
-            token: None,
+            token: OnceCell::new(),
         }
     }
 
-    pub async fn ensure_token(&mut self) -> Result<(), String> {
-        if self.token.is_some() {
-            return Ok(());
-        }
+    pub async fn ensure_token(&self) -> Result<(), String> {
+        self.token
+            .get_or_try_init(|| async {
+                let url = format!(
+                    "{}/-/user/org.couchdb.user:cache-manager",
+                    self.registry_url
+                );
+                let body = serde_json::json!({
+                    "name": "cache-manager",
+                    "password": "cache-manager-auto"
+                });
 
-        let url = format!("{}/-/user/org.couchdb.user:cache-manager", self.registry_url);
-        let body = serde_json::json!({
-            "name": "cache-manager",
-            "password": "cache-manager-auto"
-        });
+                let resp = self
+                    .http
+                    .put(&url)
+                    .header("content-type", "application/json")
+                    .json(&body)
+                    .send()
+                    .await
+                    .map_err(|e| format!("登录失败: {}", e))?;
 
-        let resp = self
-            .http
-            .put(&url)
-            .header("content-type", "application/json")
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| format!("登录失败: {}", e))?;
+                let json: serde_json::Value =
+                    resp.json().await.map_err(|e| e.to_string())?;
 
-        let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
-        if let Some(token) = json["token"].as_str() {
-            self.token = Some(token.to_string());
-        } else if let Some(token) = json["ok"].as_str() {
-            self.token = Some(token.to_string());
-        } else {
-            use base64::Engine;
-            let basic = base64::engine::general_purpose::STANDARD
-                .encode("cache-manager:cache-manager-auto");
-            self.token = Some(format!("Basic {}", basic));
-        }
+                let token = if let Some(t) = json["token"].as_str() {
+                    t.to_string()
+                } else if let Some(t) = json["ok"].as_str() {
+                    t.to_string()
+                } else {
+                    use base64::Engine;
+                    let basic = base64::engine::general_purpose::STANDARD
+                        .encode("cache-manager:cache-manager-auto");
+                    format!("Basic {}", basic)
+                };
 
+                Ok::<String, String>(token)
+            })
+            .await?;
         Ok(())
     }
 
@@ -228,7 +235,7 @@ impl RegistryClient {
     }
 
     pub async fn publish_package(
-        &mut self,
+        &self,
         name: &str,
         version: &str,
         metadata: serde_json::Value,
@@ -259,7 +266,7 @@ impl RegistryClient {
             .put(&url)
             .header("content-type", "application/json");
 
-        if let Some(ref token) = self.token {
+        if let Some(token) = self.token.get() {
             if token.starts_with("Basic ") {
                 req = req.header("authorization", token.as_str());
             } else {

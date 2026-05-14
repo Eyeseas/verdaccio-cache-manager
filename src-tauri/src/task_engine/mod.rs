@@ -93,14 +93,20 @@ impl TaskEngine {
                 .collect::<Vec<_>>()
         };
 
+        let source_client = Arc::new(RegistryClient::new(&source_registry));
+        let target_client = Arc::new(RegistryClient::new(&target_registry));
+        // 预先登录目标 registry，避免并发任务重复触发
+        // PUT /-/user/org.couchdb.user:cache-manager 而打满 409 日志
+        let _ = target_client.ensure_token().await;
+
         let mut handles = Vec::new();
 
         for task in tasks_snapshot {
             let sem = self.semaphore.clone();
             let tasks_ref = self.tasks.clone();
             let app = app_handle.clone();
-            let source = source_registry.clone();
-            let target = target_registry.clone();
+            let source = source_client.clone();
+            let target = target_client.clone();
             let retry_count = self.retry_count;
             let timeout_secs = self.timeout_secs;
 
@@ -110,8 +116,8 @@ impl TaskEngine {
                     task,
                     tasks_ref,
                     app,
-                    &source,
-                    &target,
+                    source,
+                    target,
                     retry_count,
                     timeout_secs,
                 )
@@ -130,20 +136,30 @@ async fn execute_single_task(
     task: CacheTask,
     tasks: Arc<Mutex<Vec<CacheTask>>>,
     app: AppHandle,
-    source_registry: &str,
-    target_registry: &str,
+    source_client: Arc<RegistryClient>,
+    target_client: Arc<RegistryClient>,
     retry_count: u32,
     timeout_secs: u64,
 ) {
     let is_local_source = task.tarball_url.as_ref().map_or(false, |u| {
         u.starts_with("file://") || u.starts_with("dir://")
     });
-    let use_proxy_cache = !is_local_source && source_registry.contains("npmjs.org");
+    let use_proxy_cache =
+        !is_local_source && source_client.registry_url.contains("npmjs.org");
 
     if use_proxy_cache {
-        execute_proxy_cache(task, tasks, app, target_registry, retry_count, timeout_secs).await;
+        execute_proxy_cache(task, tasks, app, target_client, retry_count, timeout_secs).await;
     } else {
-        execute_publish(task, tasks, app, source_registry, target_registry, retry_count, timeout_secs).await;
+        execute_publish(
+            task,
+            tasks,
+            app,
+            source_client,
+            target_client,
+            retry_count,
+            timeout_secs,
+        )
+        .await;
     }
 }
 
@@ -151,12 +167,10 @@ async fn execute_proxy_cache(
     task: CacheTask,
     tasks: Arc<Mutex<Vec<CacheTask>>>,
     app: AppHandle,
-    target_registry: &str,
+    target_client: Arc<RegistryClient>,
     retry_count: u32,
     timeout_secs: u64,
 ) {
-    let target_client = RegistryClient::new(target_registry);
-
     update_task_status(&tasks, &task.id, TaskStatus::Downloading, None, &app).await;
 
     for attempt in 0..=retry_count {
@@ -204,19 +218,16 @@ async fn execute_publish(
     task: CacheTask,
     tasks: Arc<Mutex<Vec<CacheTask>>>,
     app: AppHandle,
-    source_registry: &str,
-    target_registry: &str,
+    source_client: Arc<RegistryClient>,
+    target_client: Arc<RegistryClient>,
     retry_count: u32,
     timeout_secs: u64,
 ) {
-    let source_client = RegistryClient::new(source_registry);
-    let mut target_client = RegistryClient::new(target_registry);
-
     let tarball_url = match &task.tarball_url {
         Some(url) => url.clone(),
         None => format!(
             "{}/{}/-/{}-{}.tgz",
-            source_registry, task.package_name, task.package_name, task.version
+            source_client.registry_url, task.package_name, task.package_name, task.version
         ),
     };
 
@@ -304,7 +315,7 @@ async fn execute_publish(
         "name": task.package_name,
         "version": task.version,
         "dist": {
-            "tarball": format!("{}/{}/-/{}-{}.tgz", target_registry, task.package_name, task.package_name, task.version)
+            "tarball": format!("{}/{}/-/{}-{}.tgz", target_client.registry_url, task.package_name, task.package_name, task.version)
         }
     });
 
