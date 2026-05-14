@@ -22,8 +22,35 @@
 
 ## 截图
 
-<!-- 把截图放到 docs/ 下后引用即可 -->
-<!-- ![搜索页](docs/screenshots/search.png) -->
+### 搜索与缓存
+
+在 **npmjs** 标签下搜公网包，按勾选的版本批量推送；切到 **Verdaccio** 标签可查看私服已缓存的包并继续操作。
+
+| npmjs 多版本勾选 | Verdaccio 已缓存包 |
+|---|---|
+| ![](docs/screenshots/search-npmjs-versions.png) | ![](docs/screenshots/search-verdaccio-cached.png) |
+
+### 依赖文件导入
+
+拖入 `package.json` / `pnpm-lock.yaml` / `package-lock.json`，自动解析依赖并标记哪些版本尚未缓存。
+
+| 空状态 | 解析后的依赖列表 |
+|---|---|
+| ![](docs/screenshots/import-empty.png) | ![](docs/screenshots/import-package-json.png) |
+
+### 本地上传
+
+选择本地项目目录，扫描 `node_modules` 并对比已缓存索引；也支持单独上传 `.tgz`。
+
+| 空状态 | 扫描结果（已缓存 / 未缓存） |
+|---|---|
+| ![](docs/screenshots/local-upload-empty.png) | ![](docs/screenshots/local-upload-scan.png) |
+
+### 设置
+
+配置 Verdaccio 地址、可选 storage 路径、并发数、重试与超时；同步本地缓存索引。
+
+![](docs/screenshots/settings.png)
 
 ## 安装
 
