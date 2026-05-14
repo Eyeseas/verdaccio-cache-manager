@@ -128,7 +128,10 @@ jobs:
         run: |
           VERSION="${{ steps.tag.outputs.name }}"
           VERSION="${VERSION#v}"
-          BODY=$(awk "/^## v${VERSION}/,/^## v[0-9]/" CHANGELOG.md | sed '$d')
+          BODY=$(awk -v ver="$VERSION" '
+            /^## v[0-9]/ { in_section = ($0 ~ "^## v" ver "( |$)"); next }
+            in_section { print }
+          ' CHANGELOG.md)
           if [ -z "$BODY" ]; then
             BODY="See the assets to download this version and install."
           fi
@@ -144,7 +147,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           tagName: ${{ steps.tag.outputs.name }}
-          releaseName: "Verdaccio Cache Manager ${{ steps.tag.outputs.name }}"
+          releaseName: ${{ steps.tag.outputs.name }}
           releaseBody: "${{ steps.changelog.outputs.body }}"
           releaseDraft: true
           prerelease: false
