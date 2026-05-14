@@ -15,6 +15,26 @@ import {
   PopoverTrigger,
 } from "@/components/ui/popover";
 import { ExportDropdown } from "@/components/ExportDropdown";
+import {
+  applyResolveProgress,
+  applyResolvedPackages,
+  applyTaskProgress,
+  areSelectionsEqual,
+  cacheTaskInputsFromDependencies,
+  cacheTaskInputsFromResolved,
+  createResolveRequestId,
+  dependencyRootsFromResolved,
+  getRowState,
+  isCurrentResolveRequest,
+  isSelectableState,
+  pruneSelection,
+  removeResolvedFromSelection,
+  rowKey,
+  type ParsedDependency,
+  type ResolveProgressPayload,
+  type ResolvedImportPackage,
+  type RowState,
+} from "./importPageLogic";
 
 const SUPPORTED_FILES = [
   "package.json",
@@ -26,40 +46,10 @@ const isDependencyFile = (path: string) => {
   return SUPPORTED_FILES.includes(name);
 };
 
-interface ParsedDependency {
-  name: string;
-  version: string;
-  tarball_url: string | null;
-}
-
 interface CachedStatus {
   name: string;
   version: string;
   cached: boolean;
-}
-
-type RowStatus =
-  | "unknown"
-  | "cached"
-  | "uncached"
-  | "resolving"
-  | "resolve-failed"
-  | "downloading"
-  | "uploading"
-  | "failed";
-
-interface RowState {
-  status: RowStatus;
-  resolvedVersion?: string;
-  error?: string;
-}
-
-interface ResolveProgressPayload {
-  name: string;
-  raw_range: string;
-  resolved_version: string | null;
-  cached: boolean;
-  error: string | null;
 }
 
 type TaskStatusEnum =
@@ -78,8 +68,6 @@ interface TaskProgressPayload {
   error: string | null;
 }
 
-const rowKey = (name: string, rawRange: string) => `${name}::${rawRange}`;
-
 export function ImportPage() {
   const { startCacheTasks, resolveDependencies } = useTaskStore();
 
@@ -95,6 +83,7 @@ export function ImportPage() {
   const dropZoneRef = useRef<HTMLDivElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const pendingInitSelectionRef = useRef(false);
+  const resolveRequestIdRef = useRef<string | null>(null);
 
   const rowVirtualizer = useVirtualizer({
     count: parsedDeps.length,
@@ -109,31 +98,11 @@ export function ImportPage() {
 
     listen<ResolveProgressPayload>("import-resolve-progress", (event) => {
       if (stopped) return;
-      const p = event.payload;
-      const key = rowKey(p.name, p.raw_range);
       setRowStates((prev) => {
-        const next = new Map(prev);
-        const cur = next.get(key) ?? { status: "unknown" };
-        if (p.error) {
-          next.set(key, {
-            ...cur,
-            status: "resolve-failed",
-            error: p.error,
-            resolvedVersion: p.resolved_version ?? cur.resolvedVersion,
-          });
-        } else if (p.cached) {
-          next.set(key, {
-            ...cur,
-            status: "cached",
-            resolvedVersion: p.resolved_version ?? cur.resolvedVersion,
-          });
-        } else {
-          next.set(key, {
-            ...cur,
-            status: "uncached",
-            resolvedVersion: p.resolved_version ?? cur.resolvedVersion,
-          });
-        }
+        const next = applyResolveProgress(prev, {
+          currentRequestId: resolveRequestIdRef.current,
+          payload: event.payload,
+        });
         return next;
       });
     }).then((un) => handles.push(un));
@@ -142,37 +111,8 @@ export function ImportPage() {
       if (stopped) return;
       const p = event.payload;
       setRowStates((prev) => {
-        let changed = false;
-        const next = new Map(prev);
-        for (const [k, state] of next) {
-          if (state.resolvedVersion !== p.version) continue;
-          const sep = k.lastIndexOf("::");
-          const n = sep === -1 ? k : k.slice(0, sep);
-          if (n !== p.package_name) continue;
-          let status: RowStatus = state.status;
-          switch (p.status) {
-            case "Downloading":
-              status = "downloading";
-              break;
-            case "Uploading":
-              status = "uploading";
-              break;
-            case "Success":
-            case "Skipped":
-              status = "cached";
-              break;
-            case "Failed":
-              status = "failed";
-              break;
-            default:
-              break;
-          }
-          if (status !== state.status || state.error !== (p.error ?? undefined)) {
-            next.set(k, { ...state, status, error: p.error ?? undefined });
-            changed = true;
-          }
-        }
-        return changed ? next : prev;
+        const next = applyTaskProgress(prev, p);
+        return next;
       });
     }).then((un) => handles.push(un));
 
@@ -181,6 +121,13 @@ export function ImportPage() {
       handles.forEach((fn) => fn());
     };
   }, []);
+
+  useEffect(() => {
+    setSelected((cur) => {
+      const next = pruneSelection(cur, parsedDeps, rowStates);
+      return areSelectionsEqual(cur, next) ? cur : next;
+    });
+  }, [parsedDeps, rowStates]);
 
   const checkCachedStatus = useCallback(async (parsed: ParsedDependency[]) => {
     setChecking(true);
@@ -226,6 +173,7 @@ export function ImportPage() {
       setSelected(new Set());
       setRowStates(new Map());
       setError(null);
+      resolveRequestIdRef.current = null;
       setFileName(filePath.split("/").pop() || filePath);
 
       try {
@@ -288,7 +236,7 @@ export function ImportPage() {
     const sel = new Set<number>();
     parsedDeps.forEach((d, i) => {
       const s = rowStates.get(rowKey(d.name, d.version))?.status;
-      if (s !== "cached") sel.add(i);
+      if (isSelectableState(s ?? "unknown")) sel.add(i);
     });
     setSelected(sel);
   };
@@ -320,21 +268,23 @@ export function ImportPage() {
     if (inputs.length === 0) return;
 
     markRowsResolving(indices);
+    const requestId = createResolveRequestId();
+    resolveRequestIdRef.current = requestId;
     setCaching(true);
     try {
-      const resolved = await invoke<ParsedDependency[]>(
+      const resolved = await invoke<ResolvedImportPackage[]>(
         "resolve_package_versions",
-        { packages: inputs }
+        { packages: inputs, requestId }
       );
-      if (resolved.length === 0) return;
-      await startCacheTasks(
-        resolved.map((r) => ({
-          package_name: r.name,
-          version: r.version,
-          tarball_url: r.tarball_url || undefined,
-        }))
-      );
-      setSelected(new Set());
+      if (!isCurrentResolveRequest(resolveRequestIdRef.current, requestId)) {
+        return;
+      }
+      setRowStates((prev) => applyResolvedPackages(prev, resolved));
+      const tasks = cacheTaskInputsFromResolved(resolved);
+      setSelected((cur) => removeResolvedFromSelection(cur, parsedDeps, resolved));
+      if (tasks.length > 0) {
+        await startCacheTasks(tasks);
+      }
     } catch (e) {
       console.error("版本解析失败:", e);
     } finally {
@@ -353,22 +303,37 @@ export function ImportPage() {
     if (inputs.length === 0) return;
 
     markRowsResolving(indices);
+    const requestId = createResolveRequestId();
+    resolveRequestIdRef.current = requestId;
     setResolving(true);
     try {
-      const directlyResolved = await invoke<ParsedDependency[]>(
+      const directlyResolved = await invoke<ResolvedImportPackage[]>(
         "resolve_package_versions",
-        { packages: inputs }
+        { packages: inputs, requestId }
       );
-      if (directlyResolved.length === 0) return;
-      const resolved = await resolveDependencies(
-        directlyResolved.map((p) => ({
-          package_name: p.name,
-          version: p.version,
-        }))
+      if (!isCurrentResolveRequest(resolveRequestIdRef.current, requestId)) {
+        return;
+      }
+      setRowStates((prev) => applyResolvedPackages(prev, directlyResolved));
+      const roots = dependencyRootsFromResolved(directlyResolved);
+      setSelected((cur) =>
+        removeResolvedFromSelection(cur, parsedDeps, directlyResolved)
       );
-      await startCacheTasks(
-        resolved.map((r) => ({ package_name: r.package_name, version: r.version }))
-      );
+      if (roots.length === 0) return;
+      const resolved = await resolveDependencies(roots);
+      if (!isCurrentResolveRequest(resolveRequestIdRef.current, requestId)) {
+        return;
+      }
+      const dependencyStatuses = await invoke<CachedStatus[]>("check_cached_status", {
+        packages: resolved.map((r) => [r.package_name, r.version]),
+      });
+      if (!isCurrentResolveRequest(resolveRequestIdRef.current, requestId)) {
+        return;
+      }
+      const tasks = cacheTaskInputsFromDependencies(resolved, dependencyStatuses);
+      if (tasks.length > 0) {
+        await startCacheTasks(tasks);
+      }
       setSelected(new Set());
     } catch (e) {
       console.error("依赖解析失败:", e);
@@ -378,7 +343,7 @@ export function ImportPage() {
   };
 
   const getState = (dep: ParsedDependency): RowState =>
-    rowStates.get(rowKey(dep.name, dep.version)) ?? { status: "unknown" };
+    getRowState(rowStates, dep);
 
   const uncachedCount = parsedDeps.filter(
     (d) => getState(d).status !== "cached"
@@ -535,11 +500,7 @@ export function ImportPage() {
                 const i = row.index;
                 const dep = parsedDeps[i];
                 const state = getState(dep);
-                const selectable =
-                  state.status !== "cached" &&
-                  state.status !== "downloading" &&
-                  state.status !== "uploading" &&
-                  state.status !== "resolving";
+                const selectable = isSelectableState(state.status);
                 return (
                   <div
                     key={`${dep.name}@${dep.version}-${i}`}

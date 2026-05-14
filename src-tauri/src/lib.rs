@@ -226,11 +226,21 @@ async fn parse_file(file_path: String) -> Result<Vec<ParsedDependency>, String> 
 
 #[derive(serde::Serialize, Clone)]
 struct ResolveProgressEvent {
+    request_id: String,
     name: String,
     raw_range: String,
-    resolved_version: Option<String>,
+    version: Option<String>,
     cached: bool,
     error: Option<String>,
+}
+
+#[derive(serde::Serialize, Clone)]
+struct ResolvedImportPackage {
+    name: String,
+    raw_range: String,
+    version: String,
+    tarball_url: Option<String>,
+    cached: bool,
 }
 
 #[tauri::command]
@@ -238,7 +248,8 @@ async fn resolve_package_versions(
     app_handle: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     packages: Vec<CacheRequest>,
-) -> Result<Vec<ParsedDependency>, String> {
+    request_id: String,
+) -> Result<Vec<ResolvedImportPackage>, String> {
     use std::collections::HashMap;
     use tauri::Emitter;
     use tokio::sync::Semaphore;
@@ -256,6 +267,7 @@ async fn resolve_package_versions(
         let cache = versions_cache.clone();
         let app = app_handle.clone();
         let db = db.clone();
+        let request_id = request_id.clone();
 
         handles.push(tokio::spawn(async move {
             let name = pkg.package_name.clone();
@@ -302,24 +314,21 @@ async fn resolve_package_versions(
             let _ = app.emit(
                 "import-resolve-progress",
                 ResolveProgressEvent {
+                    request_id,
                     name: name.clone(),
                     raw_range: raw_range.clone(),
-                    resolved_version: resolved.clone(),
+                    version: resolved.clone(),
                     cached,
                     error,
                 },
             );
 
-            resolved.and_then(|v| {
-                if cached {
-                    None
-                } else {
-                    Some(ParsedDependency {
-                        name,
-                        version: v,
-                        tarball_url: pkg.tarball_url,
-                    })
-                }
+            resolved.map(|version| ResolvedImportPackage {
+                name,
+                raw_range,
+                version,
+                tarball_url: pkg.tarball_url,
+                cached,
             })
         }));
     }
