@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.1.10 (2026-05-14)
+
+### Bug Fixes
+- 并发上传 npm 包时不再每包重复登录 Verdaccio，整个扫描任务只触发 1 次 `PUT /-/user/org.couchdb.user:cache-manager`，消除大量 409 日志和密码验证开销 (2454b90)
+
 ## v0.1.9 (2026-05-14)
 
 ### CI
