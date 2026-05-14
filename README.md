@@ -1,7 +1,7 @@
 # Verdaccio Cache Manager
 
 <p>
-  <img alt="version" src="https://img.shields.io/badge/version-0.1.4-blue" />
+  <img alt="version" src="https://img.shields.io/badge/version-0.1.6-blue" />
   <img alt="platform" src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey" />
   <img alt="license" src="https://img.shields.io/badge/license-MIT-green" />
 </p>
@@ -9,8 +9,8 @@
 一个用于把 npm 包预热到私有 [Verdaccio](https://verdaccio.org/) 的桌面应用。覆盖三种场景：
 
 - **在线搜索** — 从公网 npmjs 搜包、勾选版本批量推送到私服。
-- **依赖文件导入** — 拖入 `package.json` / `pnpm-lock.yaml` / `package-lock.json`，自动解析依赖并批量缓存。
-- **本地上传** — 扫描某项目的 `node_modules`，或直接拖入 `.tgz` tarball 推送到私服，适合离线/内网补包。
+- **依赖文件导入** — 拖入 `package.json` / `pnpm-lock.yaml` / `package-lock.json`，自动解析依赖并递归缓存。
+- **本地上传** — 扫描某项目的 `node_modules`，或直接拖入 `.tgz` tarball 推送到私服，支持导出 tarball 到目录，适合离线/内网补包。
 
 技术栈：Tauri v2 · React 19 · TypeScript · Rust（tokio）· shadcn/ui · Tailwind CSS · zustand。
 
@@ -35,6 +35,18 @@
 
 > 应用未签名，首次打开 macOS 可能需要在「系统设置 → 隐私与安全性」放行。
 > `offline-webview2` Windows 包会内置 WebView2 离线安装器，安装包更大，适合不能联网或系统 WebView2 版本过旧的机器；普通 Windows 包保持原来的较小体积。
+
+## 近期更新
+
+**v0.1.6**
+- 本地上传页支持逐包上传状态展示
+
+**v0.1.5**
+- 新增导出 tarball 到目录功能
+- 支持 proxy 关闭时从本地 node_modules 上传
+- 本地 SQLite 缓存索引，增量同步已缓存包列表
+- 依赖解析支持递归缓存
+- 设置页 UI 重构
 
 ## 快速开始
 
