@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.1.18 (2026-05-15)
+
+### Bug Fixes
+- 升级 tauri-action 到 v0.6 修复签名文件与 asset 文件名不匹配的问题 (4b3ef05)
+
 ## v0.1.17 (2026-05-15)
 
 ### Bug Fixes
