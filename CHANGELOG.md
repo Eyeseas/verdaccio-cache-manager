@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.1.16 (2026-05-15)
+
+### Bug Fixes
+- 修复 release workflow 未传递签名密钥导致 updater JSON 未生成的问题 (5975e26)
+
 ## v0.1.15 (2026-05-15)
 
 ### Features
