@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { getVersion } from "@tauri-apps/api/app";
+import { check } from "@tauri-apps/plugin-updater";
+import { relaunch } from "@tauri-apps/plugin-process";
 import { useConfigStore } from "@/stores/configStore";
 import { useSyncStore } from "@/stores/syncStore";
 import { Button } from "@/components/ui/button";
@@ -39,6 +41,7 @@ export function SettingsPage() {
   } | null>(null);
   const [saving, setSaving] = useState(false);
   const [version, setVersion] = useState("");
+  const [checking, setChecking] = useState(false);
 
   useEffect(() => {
     loadConfig();
@@ -71,6 +74,29 @@ export function SettingsPage() {
       setTestResult({ ok: false, msg: `连接失败: ${e}` });
     } finally {
       setTesting(false);
+    }
+  };
+
+  const handleCheckUpdate = async () => {
+    setChecking(true);
+    try {
+      const update = await check();
+      if (update) {
+        toast.info(`发现新版本 v${update.version}`, {
+          description: "正在下载更新...",
+          duration: Infinity,
+          id: "update-progress",
+        });
+        await update.downloadAndInstall();
+        toast.success("更新已下载，即将重启应用", { id: "update-progress" });
+        await relaunch();
+      } else {
+        toast.info("当前已是最新版本");
+      }
+    } catch (e) {
+      toast.error("检查更新失败", { description: String(e) });
+    } finally {
+      setChecking(false);
     }
   };
 
@@ -303,9 +329,25 @@ export function SettingsPage() {
           </CardContent>
         </Card>
 
-        <p className="text-center text-xs text-muted-foreground">
-          {version && `v${version}`} <Heart className="inline h-3 w-3 fill-red-500 text-red-500" /> Eyeseas
-        </p>
+        <div className="flex items-center justify-center gap-3 text-xs text-muted-foreground">
+          <span>
+            {version && `v${version}`} <Heart className="inline h-3 w-3 fill-red-500 text-red-500" /> Eyeseas
+          </span>
+          <Button
+            variant="ghost"
+            size="sm"
+            className="h-6 text-xs text-muted-foreground"
+            onClick={handleCheckUpdate}
+            disabled={checking}
+          >
+            {checking ? (
+              <Loader2 className="mr-1 h-3 w-3 animate-spin" />
+            ) : (
+              <RefreshCw className="mr-1 h-3 w-3" />
+            )}
+            {checking ? "检查中..." : "检查更新"}
+          </Button>
+        </div>
       </div>
     </div>
   );

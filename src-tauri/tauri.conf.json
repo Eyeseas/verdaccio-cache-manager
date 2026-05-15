@@ -31,5 +31,13 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ]
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDc2M0ZGRTMyMDdBQTk4QjAKUldTd21Lb0hNdjQvZHU1RDd4SHdDQmx5bnhVVXJ2VzNaZ29XTjFBc0toNEY0YkJEc3V0Tm52YWUK",
+      "endpoints": [
+        "https://github.com/Eyeseas/verdaccio-cache-manager/releases/latest/download/latest.json"
+      ]
+    }
   }
 }
