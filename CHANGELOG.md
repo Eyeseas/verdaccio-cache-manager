@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.1.21 (2026-05-16)
+
+### Bug Fixes
+- 并行化 release 平台打包，并改为最终单独生成 latest.json，避免共享 updater metadata 并发写入冲突 (23a3202)
+
 ## v0.1.20 (2026-05-16)
 
 ### Bug Fixes
