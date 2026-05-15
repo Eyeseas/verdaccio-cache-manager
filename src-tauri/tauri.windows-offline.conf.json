@@ -1,5 +1,6 @@
 {
   "bundle": {
+    "createUpdaterArtifacts": false,
     "windows": {
       "minimumWebview2Version": "111.0.1661.0",
       "webviewInstallMode": {
