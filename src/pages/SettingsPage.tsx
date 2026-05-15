@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
+import { getVersion } from "@tauri-apps/api/app";
 import { useConfigStore } from "@/stores/configStore";
 import { useSyncStore } from "@/stores/syncStore";
 import { Button } from "@/components/ui/button";
@@ -22,6 +23,7 @@ import {
   Unplug,
   Database,
   Settings2,
+  Heart,
 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -36,9 +38,11 @@ export function SettingsPage() {
     msg: string;
   } | null>(null);
   const [saving, setSaving] = useState(false);
+  const [version, setVersion] = useState("");
 
   useEffect(() => {
     loadConfig();
+    getVersion().then(setVersion);
   }, [loadConfig]);
 
   useEffect(() => {
@@ -298,6 +302,10 @@ export function SettingsPage() {
             </div>
           </CardContent>
         </Card>
+
+        <p className="text-center text-xs text-muted-foreground">
+          {version && `v${version}`} <Heart className="inline h-3 w-3 fill-red-500 text-red-500" /> Eyeseas
+        </p>
       </div>
     </div>
   );
