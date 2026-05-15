@@ -101,16 +101,43 @@ describe("import page package resolution flow", () => {
 
   it("keeps the action bar visible while cache actions are running", () => {
     assert.equal(
-      shouldShowActionBar({ selectedSize: 0, resolving: true, caching: false }),
+      shouldShowActionBar({
+        selectedSize: 0,
+        resolving: true,
+        caching: false,
+        exporting: false,
+      }),
       true
     );
     assert.equal(
-      shouldShowActionBar({ selectedSize: 0, resolving: false, caching: true }),
+      shouldShowActionBar({
+        selectedSize: 0,
+        resolving: false,
+        caching: true,
+        exporting: false,
+      }),
       true
     );
     assert.equal(
-      shouldShowActionBar({ selectedSize: 0, resolving: false, caching: false }),
+      shouldShowActionBar({
+        selectedSize: 0,
+        resolving: false,
+        caching: false,
+        exporting: false,
+      }),
       false
+    );
+  });
+
+  it("keeps the action bar visible while export actions are running", () => {
+    assert.equal(
+      shouldShowActionBar({
+        selectedSize: 0,
+        resolving: false,
+        caching: false,
+        exporting: true,
+      }),
+      true
     );
   });
 

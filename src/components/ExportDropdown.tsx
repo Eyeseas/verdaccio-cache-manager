@@ -12,16 +12,25 @@ import { Download, ChevronUp, Loader2, Box, Boxes } from "lucide-react";
 import { toast } from "sonner";
 
 interface ExportDropdownProps {
-  getSelectedPackages: () => { package_name: string; version: string }[];
+  getSelectedPackages: () =>
+    | { package_name: string; version: string }[]
+    | Promise<{ package_name: string; version: string }[]>;
   disabled?: boolean;
+  onExportingChange?: (exporting: boolean) => void;
 }
 
 export function ExportDropdown({
   getSelectedPackages,
   disabled,
+  onExportingChange,
 }: ExportDropdownProps) {
   const { resolveDependencies } = useTaskStore();
   const [exporting, setExporting] = useState(false);
+
+  const setExportingState = (value: boolean) => {
+    setExporting(value);
+    onExportingChange?.(value);
+  };
 
   const selectOutputDir = async (): Promise<string | null> => {
     const dir = await open({ directory: true, multiple: false });
@@ -32,7 +41,6 @@ export function ExportDropdown({
     const dir = await selectOutputDir();
     if (!dir) return;
 
-    setExporting(true);
     try {
       const count = await invoke<number>("download_tarballs", {
         packages,
@@ -43,33 +51,45 @@ export function ExportDropdown({
       });
     } catch (e) {
       toast.error("导出失败", { description: String(e) });
-    } finally {
-      setExporting(false);
+    }
+  };
+
+  const collectPackages = async () => {
+    try {
+      return await getSelectedPackages();
+    } catch (e) {
+      toast.error("版本解析失败", { description: String(e) });
+      return null;
     }
   };
 
   const handleExportSelected = async () => {
-    const packages = getSelectedPackages();
-    if (packages.length === 0) return;
-    await doExport(packages);
+    setExportingState(true);
+    try {
+      const packages = await collectPackages();
+      if (!packages || packages.length === 0) return;
+      await doExport(packages);
+    } finally {
+      setExportingState(false);
+    }
   };
 
   const handleExportWithDeps = async () => {
-    const packages = getSelectedPackages();
-    if (packages.length === 0) return;
-
-    setExporting(true);
+    setExportingState(true);
     try {
+      const packages = await collectPackages();
+      if (!packages || packages.length === 0) return;
+
       const resolved = await resolveDependencies(packages);
       const resolvedPkgs = resolved.map((r) => ({
         package_name: r.package_name,
         version: r.version,
       }));
-      setExporting(false);
       await doExport(resolvedPkgs);
     } catch (e) {
       toast.error("依赖解析失败", { description: String(e) });
-      setExporting(false);
+    } finally {
+      setExportingState(false);
     }
   };
 

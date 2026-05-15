@@ -71,7 +71,9 @@ export const shouldShowActionBar = (state: {
   selectedSize: number;
   resolving: boolean;
   caching: boolean;
-}) => state.selectedSize > 0 || state.resolving || state.caching;
+  exporting: boolean;
+}) =>
+  state.selectedSize > 0 || state.resolving || state.caching || state.exporting;
 
 export const getRowState = (
   states: Map<string, RowState>,

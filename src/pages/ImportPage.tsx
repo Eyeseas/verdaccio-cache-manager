@@ -81,6 +81,7 @@ export function ImportPage() {
   const [error, setError] = useState<string | null>(null);
   const [resolving, setResolving] = useState(false);
   const [caching, setCaching] = useState(false);
+  const [exporting, setExporting] = useState(false);
   const dropZoneRef = useRef<HTMLDivElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const pendingInitSelectionRef = useRef(false);
@@ -352,6 +353,7 @@ export function ImportPage() {
     selectedSize: selected.size,
     resolving,
     caching,
+    exporting,
   });
 
   const renderBadge = (state: RowState) => {
@@ -591,21 +593,65 @@ export function ImportPage() {
               </Popover>
               <div className="flex gap-2">
                 <ExportDropdown
-                  getSelectedPackages={() =>
-                    Array.from(selected).map((i) => {
+                  getSelectedPackages={async () => {
+                    const indices = Array.from(selected);
+                    const result: { package_name: string; version: string }[] = [];
+                    const unresolved: { dep: ParsedDependency; index: number }[] = [];
+
+                    for (const i of indices) {
                       const dep = parsedDeps[i];
+                      if (!dep) continue;
                       const state = getState(dep);
-                      return {
-                        package_name: dep.name,
-                        version: state.resolvedVersion ?? dep.version,
-                      };
-                    })
-                  }
+                      if (state.resolvedVersion) {
+                        result.push({
+                          package_name: dep.name,
+                          version: state.resolvedVersion,
+                        });
+                      } else {
+                        unresolved.push({ dep, index: i });
+                      }
+                    }
+
+                    if (unresolved.length === 0) return result;
+
+                    const inputs = unresolved.map(({ dep }) => ({
+                      package_name: dep.name,
+                      version: dep.version,
+                      tarball_url: dep.tarball_url || undefined,
+                    }));
+                    markRowsResolving(unresolved.map(({ index }) => index));
+                    const requestId = createResolveRequestId();
+                    resolveRequestIdRef.current = requestId;
+
+                    const resolved = await invoke<ResolvedImportPackage[]>(
+                      "resolve_package_versions",
+                      { packages: inputs, requestId }
+                    );
+                    setRowStates((prev) => applyResolvedPackages(prev, resolved));
+
+                    const resolvedMap = new Map<string, string>();
+                    for (const r of resolved) {
+                      resolvedMap.set(rowKey(r.name, r.raw_range), r.version);
+                    }
+                    for (const { dep } of unresolved) {
+                      const v = resolvedMap.get(rowKey(dep.name, dep.version));
+                      if (v) {
+                        result.push({ package_name: dep.name, version: v });
+                      }
+                    }
+
+                    if (result.length === 0) {
+                      throw new Error("选中的包均无法解析到具体版本");
+                    }
+                    return result;
+                  }}
+                  disabled={resolving || caching}
+                  onExportingChange={setExporting}
                 />
                 <Button
                   variant="outline"
                   onClick={handleCacheWithDeps}
-                  disabled={resolving || caching}
+                  disabled={resolving || caching || exporting}
                 >
                   {resolving ? (
                     <>
@@ -616,7 +662,10 @@ export function ImportPage() {
                     "缓存包及依赖"
                   )}
                 </Button>
-                <Button onClick={handleCache} disabled={resolving || caching}>
+                <Button
+                  onClick={handleCache}
+                  disabled={resolving || caching || exporting}
+                >
                   {caching ? (
                     <>
                       <Loader2 className="mr-2 h-4 w-4 animate-spin" />
