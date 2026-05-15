@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.1.19 (2026-05-16)
+
+### Bug Fixes
+- 生成 Tauri updater 发布产物，修复 GitHub Release 缺少 latest.json 导致检查更新失败的问题 (34ecf91)
+
 ## v0.1.18 (2026-05-15)
 
 ### Bug Fixes
