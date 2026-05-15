@@ -1,5 +1,6 @@
 import { NavLink } from "react-router-dom";
-import { Search, FileInput, Upload, Settings } from "lucide-react";
+import { Search, FileInput, Upload, Settings, RefreshCw } from "lucide-react";
+import { useSyncStore } from "@/stores/syncStore";
 
 const navItems = [
   { to: "/", icon: Search, label: "搜索" },
@@ -9,6 +10,10 @@ const navItems = [
 ];
 
 export function Sidebar() {
+  const syncStatus = useSyncStore((s) => s.status);
+  const startSync = useSyncStore((s) => s.startSync);
+  const isSyncing = syncStatus === "syncing";
+
   return (
     <aside className="flex w-16 flex-col items-center border-r bg-sidebar py-4 gap-2">
       {navItems.map((item) => (
@@ -27,6 +32,16 @@ export function Sidebar() {
           <span>{item.label}</span>
         </NavLink>
       ))}
+      <button
+        type="button"
+        onClick={startSync}
+        disabled={isSyncing}
+        title={isSyncing ? "同步中..." : "同步缓存索引"}
+        className="mt-auto flex flex-col items-center justify-center w-12 h-12 rounded-lg text-xs gap-1 transition-colors text-sidebar-foreground/60 hover:text-sidebar-foreground hover:bg-sidebar-accent/50 disabled:opacity-60 disabled:hover:bg-transparent disabled:hover:text-sidebar-foreground/60"
+      >
+        <RefreshCw className={`h-5 w-5 ${isSyncing ? "animate-spin" : ""}`} />
+        <span>{isSyncing ? "同步中" : "同步"}</span>
+      </button>
     </aside>
   );
 }
