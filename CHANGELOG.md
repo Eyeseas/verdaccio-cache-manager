@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.1.20 (2026-05-16)
+
+### Bug Fixes
+- 串行化 release asset 发布，避免多个平台同时更新 latest.json 导致 release workflow 失败和 updater metadata 不完整 (07fae40)
+
 ## v0.1.19 (2026-05-16)
 
 ### Bug Fixes
