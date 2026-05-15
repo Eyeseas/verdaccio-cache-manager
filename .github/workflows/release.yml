@@ -12,12 +12,72 @@ on:
         default: ""
 
 jobs:
+  release-info:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      publish: ${{ steps.release.outputs.publish }}
+      tag: ${{ steps.release.outputs.tag }}
+      release-id: ${{ steps.ensure-release.outputs.id }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Determine release inputs
+        id: release
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          elif [ -n "${{ github.event.inputs.tag }}" ]; then
+            echo "tag=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=" >> "$GITHUB_OUTPUT"
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Extract release notes
+        if: steps.release.outputs.publish == 'true'
+        shell: bash
+        env:
+          TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          VERSION="${TAG#v}"
+          BODY=$(awk -v ver="$VERSION" '
+            /^## v[0-9]/ { in_section = ($0 ~ "^## v" ver "( |$)"); next }
+            in_section { print }
+          ' CHANGELOG.md)
+          if [ -z "$BODY" ]; then
+            BODY="See the assets to download this version and install."
+          fi
+          printf '%s\n' "$BODY" > release-notes.md
+
+      - name: Create or find draft release
+        if: steps.release.outputs.publish == 'true'
+        id: ensure-release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release edit "$TAG" --title "$TAG" --notes-file release-notes.md
+          else
+            gh release create "$TAG" --title "$TAG" --notes-file release-notes.md --draft --verify-tag
+          fi
+          RELEASE_ID=$(gh release view "$TAG" --json databaseId --jq .databaseId)
+          echo "id=$RELEASE_ID" >> "$GITHUB_OUTPUT"
+
   build:
+    needs: release-info
     permissions:
       contents: write
     strategy:
       fail-fast: false
-      max-parallel: 1
       matrix:
         include:
           - name: macos-arm64
@@ -25,37 +85,31 @@ jobs:
             target: aarch64-apple-darwin
             args: --target aarch64-apple-darwin
             assetNamePattern: ""
-            includeUpdaterJson: true
           - name: macos-x64
             platform: macos-latest
             target: x86_64-apple-darwin
             args: --target x86_64-apple-darwin
             assetNamePattern: ""
-            includeUpdaterJson: true
           - name: linux-x64
             platform: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             args: ""
             assetNamePattern: ""
-            includeUpdaterJson: true
           - name: linux-arm64
             platform: ubuntu-22.04-arm
             target: aarch64-unknown-linux-gnu
             args: ""
             assetNamePattern: ""
-            includeUpdaterJson: true
           - name: windows-x64
             platform: windows-latest
             target: x86_64-pc-windows-msvc
             args: ""
             assetNamePattern: ""
-            includeUpdaterJson: true
           - name: windows-x64-offline-webview2
             platform: windows-latest
             target: x86_64-pc-windows-msvc
             args: --target x86_64-pc-windows-msvc --config src-tauri/tauri.windows-offline.conf.json
             assetNamePattern: "[name]_[version]_[platform]_[arch]_offline-webview2[setup][ext]"
-            includeUpdaterJson: false
 
     runs-on: ${{ matrix.platform }}
     name: build (${{ matrix.name }})
@@ -107,69 +161,34 @@ jobs:
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Determine tag name
-        id: tag
-        shell: bash
-        run: |
-          if [ "${{ github.event_name }}" = "push" ]; then
-            echo "name=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
-            echo "publish=true" >> "$GITHUB_OUTPUT"
-          elif [ -n "${{ github.event.inputs.tag }}" ]; then
-            echo "name=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
-            echo "publish=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "name=" >> "$GITHUB_OUTPUT"
-            echo "publish=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Extract changelog for this version
-        if: steps.tag.outputs.publish == 'true'
-        id: changelog
-        shell: bash
-        run: |
-          VERSION="${{ steps.tag.outputs.name }}"
-          VERSION="${VERSION#v}"
-          BODY=$(awk -v ver="$VERSION" '
-            /^## v[0-9]/ { in_section = ($0 ~ "^## v" ver "( |$)"); next }
-            in_section { print }
-          ' CHANGELOG.md)
-          if [ -z "$BODY" ]; then
-            BODY="See the assets to download this version and install."
-          fi
-          EOF=$(dd if=/dev/urandom bs=15 count=1 status=none | base64)
-          echo "body<<$EOF" >> "$GITHUB_OUTPUT"
-          echo "$BODY" >> "$GITHUB_OUTPUT"
-          echo "$EOF" >> "$GITHUB_OUTPUT"
-
-      - name: Build & release with tauri-action
-        if: steps.tag.outputs.publish == 'true'
+      - name: Build & upload release assets
+        if: needs.release-info.outputs.publish == 'true'
         uses: tauri-apps/tauri-action@v0.6
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
-          tagName: ${{ steps.tag.outputs.name }}
-          releaseName: ${{ steps.tag.outputs.name }}
-          releaseBody: "${{ steps.changelog.outputs.body }}"
-          releaseDraft: false
+          releaseId: ${{ needs.release-info.outputs.release-id }}
+          tagName: ${{ needs.release-info.outputs.tag }}
+          releaseDraft: true
           prerelease: false
           args: ${{ matrix.args }}
           assetNamePattern: ${{ matrix.assetNamePattern }}
-          includeUpdaterJson: ${{ matrix.includeUpdaterJson }}
+          includeUpdaterJson: false
 
       - name: Build without publishing
-        if: steps.tag.outputs.publish != 'true'
+        if: needs.release-info.outputs.publish != 'true'
         uses: tauri-apps/tauri-action@v0.6
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           args: ${{ matrix.args }}
           assetNamePattern: ${{ matrix.assetNamePattern }}
-          includeUpdaterJson: ${{ matrix.includeUpdaterJson }}
+          includeUpdaterJson: false
 
       - name: Upload artifacts (no-release runs)
-        if: steps.tag.outputs.publish != 'true'
+        if: needs.release-info.outputs.publish != 'true'
         uses: actions/upload-artifact@v5
         with:
           name: ${{ matrix.name }}-bundles
@@ -178,3 +197,44 @@ jobs:
             !src-tauri/target/**/release/bundle/**/*.tmp
           if-no-files-found: warn
           retention-days: 7
+
+  publish-updater-json:
+    needs:
+      - release-info
+      - build
+    if: needs.release-info.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Extract release notes
+        shell: bash
+        env:
+          TAG: ${{ needs.release-info.outputs.tag }}
+        run: |
+          VERSION="${TAG#v}"
+          BODY=$(awk -v ver="$VERSION" '
+            /^## v[0-9]/ { in_section = ($0 ~ "^## v" ver "( |$)"); next }
+            in_section { print }
+          ' CHANGELOG.md)
+          if [ -z "$BODY" ]; then
+            BODY="See the assets to download this version and install."
+          fi
+          printf '%s\n' "$BODY" > release-notes.md
+
+      - name: Build and upload updater JSON
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.release-info.outputs.tag }}
+        run: |
+          gh release view "$TAG" --json assets,publishedAt,tagName > release-assets.json
+          PUB_DATE=$(date -u +"%Y-%m-%dT%H:%M:%S.000Z")
+          PUB_DATE="$PUB_DATE" node .github/scripts/build-updater-json.mjs --assets release-assets.json --notes release-notes.md --out latest.json
+          gh release upload "$TAG" latest.json --clobber
+          gh release edit "$TAG" --draft=false --latest
