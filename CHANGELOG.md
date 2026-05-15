@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.1.17 (2026-05-15)
+
+### Bug Fixes
+- 升级 tauri-action 到 v0.5 修复 updater 签名文件检测失败的问题 (6f333f1)
+
 ## v0.1.16 (2026-05-15)
 
 ### Bug Fixes
