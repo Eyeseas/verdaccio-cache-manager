@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.1.22 (2026-05-16)
+
+### Bug Fixes
+- 将 draft release 阶段生成的 updater 下载地址重写为正式 tag 地址，修复 latest.json 指向 untagged 资产导致检查更新下载 404 的问题 (4efb822)
+
 ## v0.1.21 (2026-05-16)
 
 ### Bug Fixes
