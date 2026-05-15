@@ -116,7 +116,7 @@ async function fetchSignature(asset) {
   return (await response.text()).trim();
 }
 
-async function platformEntry(bundle, assetsByName) {
+async function platformEntry(bundle, assetsByName, tag) {
   const url = assetDownloadUrl(bundle);
   if (!url) {
     throw new Error(`Bundle asset ${bundle.name} has no downloadable URL`);
@@ -129,23 +129,28 @@ async function platformEntry(bundle, assetsByName) {
 
   return {
     signature: await fetchSignature(signatureAsset),
-    url,
+    url: taggedDownloadUrl(url, tag),
   };
 }
 
-function releaseVersion(release) {
+function releaseTag(release) {
   const tag = process.env.TAG || release.tagName;
   if (!tag) {
     throw new Error("TAG environment variable or release tagName is required");
   }
 
-  return tag.replace(/^v/, "");
+  return tag;
+}
+
+function taggedDownloadUrl(url, tag) {
+  return url.replace(/\/download\/(untagged-[^/]+)\//, `/download/${encodeURIComponent(tag)}/`);
 }
 
 async function main() {
   const { assets: assetsPath, notes: notesPath, out } = parseArgs(process.argv.slice(2));
   const release = JSON.parse(await readFile(assetsPath, "utf8"));
   const assets = normalizeAssets(release);
+  const tag = releaseTag(release);
   const notes = (await readFile(notesPath, "utf8")).trim() || fallbackNotes;
   const assetsByName = new Map(assets.map((asset) => [asset.name, asset]));
   const platforms = {};
@@ -163,7 +168,7 @@ async function main() {
       continue;
     }
 
-    const entry = await platformEntry(bundle, assetsByName);
+    const entry = await platformEntry(bundle, assetsByName, tag);
     for (const key of definition.keys) {
       platforms[key] = entry;
     }
@@ -174,7 +179,7 @@ async function main() {
   }
 
   const latest = {
-    version: releaseVersion(release),
+    version: tag.replace(/^v/, ""),
     notes,
     pub_date: process.env.PUB_DATE || release.publishedAt || new Date().toISOString(),
     platforms,

@@ -90,11 +90,15 @@ describe("release updater configuration", () => {
 
     const asset = (name) => ({
       name,
-      url: `https://example.com/downloads/${encodeURIComponent(name)}`,
+      url: `https://github.com/Eyeseas/verdaccio-cache-manager/releases/download/untagged-test/${encodeURIComponent(
+        name
+      )}`,
     });
     const sig = (name, signature) => ({
       name: `${name}.sig`,
-      url: `https://example.com/downloads/${encodeURIComponent(name)}.sig`,
+      url: `https://github.com/Eyeseas/verdaccio-cache-manager/releases/download/untagged-test/${encodeURIComponent(
+        name
+      )}.sig`,
       signature,
     });
 
@@ -160,15 +164,15 @@ describe("release updater configuration", () => {
       ]);
       assert.equal(
         latest.platforms["windows-x86_64"].url,
-        "https://example.com/downloads/Verdaccio.Cache.Manager_0.1.21_x64_en-US.msi"
+        "https://github.com/Eyeseas/verdaccio-cache-manager/releases/download/v0.1.21/Verdaccio.Cache.Manager_0.1.21_x64_en-US.msi"
       );
       assert.equal(
         latest.platforms["windows-x86_64-nsis"].url,
-        "https://example.com/downloads/Verdaccio.Cache.Manager_0.1.21_x64-setup.exe"
+        "https://github.com/Eyeseas/verdaccio-cache-manager/releases/download/v0.1.21/Verdaccio.Cache.Manager_0.1.21_x64-setup.exe"
       );
       assert.equal(
         latest.platforms["linux-aarch64"].url,
-        "https://example.com/downloads/Verdaccio.Cache.Manager_0.1.21_aarch64.AppImage"
+        "https://github.com/Eyeseas/verdaccio-cache-manager/releases/download/v0.1.21/Verdaccio.Cache.Manager_0.1.21_aarch64.AppImage"
       );
       assert.equal(latest.platforms["darwin-x86_64"].signature, "sig:Verdaccio.Cache.Manager_x64.app.tar.gz");
       assert.ok(
