@@ -9,6 +9,8 @@ import {
   cacheTaskInputsFromDependencies,
   dependencyRootsFromResolved,
   exportPackagesFromResolvedSelection,
+  getContextMenuActionState,
+  getResolvedVersionOrThrow,
   isCurrentResolveRequest,
   pruneSelection,
   removeResolvedFromSelection,
@@ -18,6 +20,7 @@ import {
   type ResolvedImportPackage,
   type RowState,
 } from "../src/pages/importPageLogic.ts";
+import { positionContextMenu } from "../src/components/rowContextMenuLogic.ts";
 
 describe("import page package resolution flow", () => {
   it("keeps cached resolved root packages for dependency resolution", () => {
@@ -141,6 +144,36 @@ describe("import page package resolution flow", () => {
       }),
       true
     );
+  });
+
+  it("disables context menu cache actions for rows that are already busy or cached", () => {
+    assert.deepEqual(getContextMenuActionState("uncached", false), {
+      cacheDisabled: false,
+      exportDisabled: false,
+    });
+    assert.deepEqual(getContextMenuActionState("downloading", false), {
+      cacheDisabled: true,
+      exportDisabled: false,
+    });
+    assert.deepEqual(getContextMenuActionState("uploading", false), {
+      cacheDisabled: true,
+      exportDisabled: false,
+    });
+    assert.deepEqual(getContextMenuActionState("resolving", false), {
+      cacheDisabled: true,
+      exportDisabled: false,
+    });
+    assert.deepEqual(getContextMenuActionState("cached", false), {
+      cacheDisabled: true,
+      exportDisabled: false,
+    });
+  });
+
+  it("disables all context menu actions while global import actions are busy", () => {
+    assert.deepEqual(getContextMenuActionState("uncached", true), {
+      cacheDisabled: true,
+      exportDisabled: true,
+    });
   });
 
   it("clears successfully resolved selected rows even when no cache task starts", () => {
@@ -290,6 +323,13 @@ describe("import page package resolution flow", () => {
     );
   });
 
+  it("rejects single package export when resolution returns no concrete version", () => {
+    assert.throws(
+      () => getResolvedVersionOrThrow("missing-package", "^1", []),
+      /missing-package@\^1/
+    );
+  });
+
   it("builds export packages only after all pending packages resolve", () => {
     assert.deepEqual(
       exportPackagesFromResolvedSelection({
@@ -309,6 +349,23 @@ describe("import page package resolution flow", () => {
         { package_name: "react", version: "19.1.0" },
         { package_name: "vite", version: "7.0.4" },
       ]
+    );
+  });
+
+  it("keeps context menus and submenus inside the viewport", () => {
+    assert.deepEqual(
+      positionContextMenu({
+        anchor: { x: 760, y: 560 },
+        menuSize: { width: 180, height: 120 },
+        submenuSize: { width: 210, height: 80 },
+        viewport: { width: 800, height: 600 },
+        gap: 4,
+      }),
+      {
+        left: 576,
+        top: 436,
+        submenuSide: "left",
+      }
     );
   });
 });

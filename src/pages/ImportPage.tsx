@@ -15,6 +15,8 @@ import {
   PopoverTrigger,
 } from "@/components/ui/popover";
 import { ExportDropdown } from "@/components/ExportDropdown";
+import { RowContextMenu, type ContextMenuPosition } from "@/components/RowContextMenu";
+import { toast } from "sonner";
 import {
   applyResolveProgress,
   applyResolvedPackagesForCurrentRequest,
@@ -26,6 +28,8 @@ import {
   createResolveRequestId,
   dependencyRootsFromResolved,
   exportPackagesFromResolvedSelection,
+  getContextMenuActionState,
+  getResolvedVersionOrThrow,
   getRowState,
   isCurrentResolveRequest,
   isSelectableState,
@@ -84,6 +88,7 @@ export function ImportPage() {
   const [resolving, setResolving] = useState(false);
   const [caching, setCaching] = useState(false);
   const [exporting, setExporting] = useState(false);
+  const [contextMenu, setContextMenu] = useState<{ index: number; position: ContextMenuPosition } | null>(null);
   const dropZoneRef = useRef<HTMLDivElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const pendingInitSelectionRef = useRef(false);
@@ -345,6 +350,124 @@ export function ImportPage() {
     }
   };
 
+  const handleContextCache = async (index: number) => {
+    const dep = parsedDeps[index];
+    if (!dep) return;
+    const inputs = [{ package_name: dep.name, version: dep.version, tarball_url: dep.tarball_url || undefined }];
+    markRowsResolving([index]);
+    const requestId = createResolveRequestId();
+    resolveRequestIdRef.current = requestId;
+    setCaching(true);
+    try {
+      const resolved = await invoke<ResolvedImportPackage[]>("resolve_package_versions", { packages: inputs, requestId });
+      if (!isCurrentResolveRequest(resolveRequestIdRef.current, requestId)) return;
+      setRowStates((prev) => applyResolvedPackages(prev, resolved));
+      const tasks = cacheTaskInputsFromResolved(resolved);
+      setSelected((cur) => removeResolvedFromSelection(cur, parsedDeps, resolved));
+      if (tasks.length > 0) await startCacheTasks(tasks);
+    } catch (e) {
+      console.error("版本解析失败:", e);
+    } finally {
+      setCaching(false);
+    }
+  };
+
+  const handleContextCacheWithDeps = async (index: number) => {
+    const dep = parsedDeps[index];
+    if (!dep) return;
+    const inputs = [{ package_name: dep.name, version: dep.version, tarball_url: dep.tarball_url || undefined }];
+    markRowsResolving([index]);
+    const requestId = createResolveRequestId();
+    resolveRequestIdRef.current = requestId;
+    setResolving(true);
+    try {
+      const directlyResolved = await invoke<ResolvedImportPackage[]>("resolve_package_versions", { packages: inputs, requestId });
+      if (!isCurrentResolveRequest(resolveRequestIdRef.current, requestId)) return;
+      setRowStates((prev) => applyResolvedPackages(prev, directlyResolved));
+      const roots = dependencyRootsFromResolved(directlyResolved);
+      setSelected((cur) => removeResolvedFromSelection(cur, parsedDeps, directlyResolved));
+      if (roots.length === 0) return;
+      const resolved = await resolveDependencies(roots);
+      if (!isCurrentResolveRequest(resolveRequestIdRef.current, requestId)) return;
+      const dependencyStatuses = await invoke<CachedStatus[]>("check_cached_status", {
+        packages: resolved.map((r) => [r.package_name, r.version]),
+      });
+      if (!isCurrentResolveRequest(resolveRequestIdRef.current, requestId)) return;
+      const tasks = cacheTaskInputsFromDependencies(resolved, dependencyStatuses);
+      if (tasks.length > 0) await startCacheTasks(tasks);
+    } catch (e) {
+      console.error("依赖解析失败:", e);
+    } finally {
+      setResolving(false);
+    }
+  };
+
+  const handleContextExportTarball = async (index: number) => {
+    const dep = parsedDeps[index];
+    if (!dep) return;
+    const state = getRowState(rowStates, dep);
+
+    setExporting(true);
+    try {
+      let version = state.resolvedVersion;
+      if (!version) {
+        const inputs = [{ package_name: dep.name, version: dep.version, tarball_url: dep.tarball_url || undefined }];
+        markRowsResolving([index]);
+        const requestId = createResolveRequestId();
+        resolveRequestIdRef.current = requestId;
+        const resolved = await invoke<ResolvedImportPackage[]>("resolve_package_versions", { packages: inputs, requestId });
+        if (!isCurrentResolveRequest(resolveRequestIdRef.current, requestId)) return;
+        setRowStates((prev) => applyResolvedPackages(prev, resolved));
+        version = getResolvedVersionOrThrow(dep.name, dep.version, resolved);
+      }
+
+      const dir = await open({ directory: true, multiple: false });
+      if (!dir) return;
+      const count = await invoke<number>("download_tarballs", {
+        packages: [{ package_name: dep.name, version }],
+        outputDir: dir,
+      });
+      toast.success("导出完成", { description: `已下载 ${count} 个 tarball 到目标目录` });
+    } catch (e) {
+      toast.error("导出失败", { description: String(e) });
+    } finally {
+      setExporting(false);
+    }
+  };
+
+  const handleContextExportTarballWithDeps = async (index: number) => {
+    const dep = parsedDeps[index];
+    if (!dep) return;
+    const state = getRowState(rowStates, dep);
+
+    setExporting(true);
+    try {
+      let version = state.resolvedVersion;
+      if (!version) {
+        const inputs = [{ package_name: dep.name, version: dep.version, tarball_url: dep.tarball_url || undefined }];
+        markRowsResolving([index]);
+        const requestId = createResolveRequestId();
+        resolveRequestIdRef.current = requestId;
+        const resolved = await invoke<ResolvedImportPackage[]>("resolve_package_versions", { packages: inputs, requestId });
+        if (!isCurrentResolveRequest(resolveRequestIdRef.current, requestId)) return;
+        setRowStates((prev) => applyResolvedPackages(prev, resolved));
+        version = getResolvedVersionOrThrow(dep.name, dep.version, resolved);
+      }
+
+      const resolved = await resolveDependencies([{ package_name: dep.name, version }]);
+      const packages = resolved.map((r) => ({ package_name: r.package_name, version: r.version }));
+
+      const dir = await open({ directory: true, multiple: false });
+      if (!dir) return;
+      const count = await invoke<number>("download_tarballs", { packages, outputDir: dir });
+      toast.success("导出完成", { description: `已下载 ${count} 个 tarball 到目标目录` });
+    } catch (e) {
+      toast.error("导出失败", { description: String(e) });
+    } finally {
+      setExporting(false);
+    }
+  };
+
   const getState = (dep: ParsedDependency): RowState =>
     getRowState(rowStates, dep);
 
@@ -523,6 +646,10 @@ export function ImportPage() {
                       transform: `translateY(${row.start}px)`,
                     }}
                     className="flex items-center gap-3 border-b px-4 py-2"
+                    onContextMenu={(e) => {
+                      e.preventDefault();
+                      setContextMenu({ index: i, position: { x: e.clientX, y: e.clientY } });
+                    }}
                   >
                     {selectable ? (
                       <Checkbox
@@ -682,6 +809,28 @@ export function ImportPage() {
           )}
         </>
       )}
+
+      {contextMenu &&
+        (() => {
+          const dep = parsedDeps[contextMenu.index];
+          if (!dep) return null;
+          const actionState = getContextMenuActionState(
+            getState(dep).status,
+            resolving || caching || exporting
+          );
+          return (
+            <RowContextMenu
+              position={contextMenu.position}
+              onClose={() => setContextMenu(null)}
+              onCache={() => handleContextCache(contextMenu.index)}
+              onCacheWithDeps={() => handleContextCacheWithDeps(contextMenu.index)}
+              onExportTarball={() => handleContextExportTarball(contextMenu.index)}
+              onExportTarballWithDeps={() => handleContextExportTarballWithDeps(contextMenu.index)}
+              cacheDisabled={actionState.cacheDisabled}
+              exportDisabled={actionState.exportDisabled}
+            />
+          );
+        })()}
     </div>
   );
 }

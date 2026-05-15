@@ -72,6 +72,14 @@ export const isSelectableState = (status: RowStatus) =>
   status !== "uploading" &&
   status !== "resolving";
 
+export const getContextMenuActionState = (
+  status: RowStatus,
+  globalBusy: boolean
+) => ({
+  cacheDisabled: globalBusy || !isSelectableState(status),
+  exportDisabled: globalBusy,
+});
+
 export const shouldShowActionBar = (state: {
   selectedSize: number;
   resolving: boolean;
@@ -320,4 +328,16 @@ export const exportPackagesFromResolvedSelection = (args: {
   }
 
   return packages;
+};
+
+export const getResolvedVersionOrThrow = (
+  name: string,
+  rawRange: string,
+  resolved: ResolvedImportPackage[]
+) => {
+  const version = resolved[0]?.version;
+  if (!version) {
+    throw new Error(`无法解析 ${name}@${rawRange} 到具体版本`);
+  }
+  return version;
 };
