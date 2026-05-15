@@ -2,11 +2,13 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
   applyResolveProgress,
+  applyResolvedPackagesForCurrentRequest,
   applyResolvedPackages,
   areSelectionsEqual,
   cacheTaskInputsFromResolved,
   cacheTaskInputsFromDependencies,
   dependencyRootsFromResolved,
+  exportPackagesFromResolvedSelection,
   isCurrentResolveRequest,
   pruneSelection,
   removeResolvedFromSelection,
@@ -238,5 +240,75 @@ describe("import page package resolution flow", () => {
       error: undefined,
       resolvedVersion: "19.1.0",
     });
+  });
+
+  it("does not apply resolved command responses from stale requests", () => {
+    const states = new Map<string, RowState>([
+      [rowKey("react", "^19"), { status: "resolving" }],
+    ]);
+
+    const next = applyResolvedPackagesForCurrentRequest(states, {
+      currentRequestId: "current",
+      responseRequestId: "old",
+      resolved: [
+        {
+          name: "react",
+          raw_range: "^19",
+          version: "19.1.0",
+          tarball_url: null,
+          cached: true,
+        },
+      ],
+    });
+
+    assert.equal(next, states);
+    assert.deepEqual(next.get(rowKey("react", "^19")), {
+      status: "resolving",
+    });
+  });
+
+  it("rejects export when any selected package cannot be resolved", () => {
+    assert.throws(
+      () =>
+        exportPackagesFromResolvedSelection({
+          alreadyResolved: [{ package_name: "react", version: "19.1.0" }],
+          pending: [
+            { name: "vite", version: "^7", tarball_url: null },
+            { name: "missing-package", version: "^1", tarball_url: null },
+          ],
+          resolved: [
+            {
+              name: "vite",
+              raw_range: "^7",
+              version: "7.0.4",
+              tarball_url: null,
+              cached: false,
+            },
+          ],
+        }),
+      /missing-package@\^1/
+    );
+  });
+
+  it("builds export packages only after all pending packages resolve", () => {
+    assert.deepEqual(
+      exportPackagesFromResolvedSelection({
+        alreadyResolved: [{ package_name: "react", version: "19.1.0" }],
+        pending: [{ name: "vite", version: "^7", tarball_url: null }],
+        resolved: [
+          {
+            name: "vite",
+            raw_range: "^7",
+            version: "7.0.4",
+            tarball_url: null,
+            cached: false,
+          },
+        ],
+      }),
+      [
+        { package_name: "react", version: "19.1.0" },
+        { package_name: "vite", version: "7.0.4" },
+      ]
+    );
   });
 });

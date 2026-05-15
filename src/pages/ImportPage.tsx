@@ -17,6 +17,7 @@ import {
 import { ExportDropdown } from "@/components/ExportDropdown";
 import {
   applyResolveProgress,
+  applyResolvedPackagesForCurrentRequest,
   applyResolvedPackages,
   applyTaskProgress,
   areSelectionsEqual,
@@ -24,6 +25,7 @@ import {
   cacheTaskInputsFromResolved,
   createResolveRequestId,
   dependencyRootsFromResolved,
+  exportPackagesFromResolvedSelection,
   getRowState,
   isCurrentResolveRequest,
   isSelectableState,
@@ -627,23 +629,23 @@ export function ImportPage() {
                       "resolve_package_versions",
                       { packages: inputs, requestId }
                     );
-                    setRowStates((prev) => applyResolvedPackages(prev, resolved));
-
-                    const resolvedMap = new Map<string, string>();
-                    for (const r of resolved) {
-                      resolvedMap.set(rowKey(r.name, r.raw_range), r.version);
-                    }
-                    for (const { dep } of unresolved) {
-                      const v = resolvedMap.get(rowKey(dep.name, dep.version));
-                      if (v) {
-                        result.push({ package_name: dep.name, version: v });
-                      }
+                    if (!isCurrentResolveRequest(resolveRequestIdRef.current, requestId)) {
+                      return [];
                     }
 
-                    if (result.length === 0) {
-                      throw new Error("选中的包均无法解析到具体版本");
-                    }
-                    return result;
+                    setRowStates((prev) =>
+                      applyResolvedPackagesForCurrentRequest(prev, {
+                        currentRequestId: resolveRequestIdRef.current,
+                        responseRequestId: requestId,
+                        resolved,
+                      })
+                    );
+
+                    return exportPackagesFromResolvedSelection({
+                      alreadyResolved: result,
+                      pending: unresolved.map(({ dep }) => dep),
+                      resolved,
+                    });
                   }}
                   disabled={resolving || caching}
                   onExportingChange={setExporting}

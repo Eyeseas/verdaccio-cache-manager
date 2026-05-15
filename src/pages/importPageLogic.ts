@@ -48,6 +48,11 @@ export interface DependencyRootInput {
   version: string;
 }
 
+export interface ExportPackageInput {
+  package_name: string;
+  version: string;
+}
+
 export interface ResolvedDependency {
   package_name: string;
   version: string;
@@ -267,6 +272,20 @@ export const applyResolvedPackages = (
   return next;
 };
 
+export const applyResolvedPackagesForCurrentRequest = (
+  states: Map<string, RowState>,
+  args: {
+    currentRequestId: string | null;
+    responseRequestId: string;
+    resolved: ResolvedImportPackage[];
+  }
+) => {
+  if (!isCurrentResolveRequest(args.currentRequestId, args.responseRequestId)) {
+    return states;
+  }
+  return applyResolvedPackages(states, args.resolved);
+};
+
 export const isCurrentResolveRequest = (
   currentRequestId: string | null,
   responseRequestId: string
@@ -274,3 +293,31 @@ export const isCurrentResolveRequest = (
 
 export const createResolveRequestId = () =>
   `import-resolve-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+
+export const exportPackagesFromResolvedSelection = (args: {
+  alreadyResolved: ExportPackageInput[];
+  pending: ParsedDependency[];
+  resolved: ResolvedImportPackage[];
+}): ExportPackageInput[] => {
+  const resolvedMap = new Map<string, string>();
+  for (const pkg of args.resolved) {
+    resolvedMap.set(rowKey(pkg.name, pkg.raw_range), pkg.version);
+  }
+
+  const missing: string[] = [];
+  const packages = [...args.alreadyResolved];
+  for (const dep of args.pending) {
+    const version = resolvedMap.get(rowKey(dep.name, dep.version));
+    if (version) {
+      packages.push({ package_name: dep.name, version });
+    } else {
+      missing.push(`${dep.name}@${dep.version}`);
+    }
+  }
+
+  if (missing.length > 0) {
+    throw new Error(`以下包无法解析到具体版本: ${missing.join(", ")}`);
+  }
+
+  return packages;
+};
