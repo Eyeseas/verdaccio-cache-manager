@@ -376,3 +376,76 @@ impl CacheDb {
             .map_err(|e| format!("清除索引失败: {}", e))
     }
 }
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::registry_client::SearchResult;
+
+    fn pkg(name: &str, versions: &[&str]) -> SearchResult {
+        SearchResult {
+            name: name.to_string(),
+            description: None,
+            latest_version: versions.last().map(|s| s.to_string()),
+            versions: versions.iter().map(|s| s.to_string()).collect(),
+            cached_versions: versions.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    fn fresh_db() -> (tempfile::TempDir, CacheDb) {
+        let dir = tempfile::tempdir().unwrap();
+        let db = CacheDb::open_at(dir.path().join("t.db")).unwrap();
+        (dir, db)
+    }
+
+    fn cached_versions(db: &CacheDb, name: &str) -> Vec<String> {
+        db.get_all_packages()
+            .unwrap()
+            .into_iter()
+            .find(|p| p.name == name)
+            .map(|p| p.cached_versions)
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn remove_single_version_keeps_package_with_remaining() {
+        let (_d, db) = fresh_db();
+        db.replace_all(&[pkg("left-pad", &["1.0.0", "2.0.0"])])
+            .unwrap();
+
+        db.remove_versions("left-pad", Some(&["1.0.0".to_string()]))
+            .unwrap();
+
+        assert_eq!(cached_versions(&db, "left-pad"), vec!["2.0.0"]);
+    }
+
+    #[test]
+    fn remove_last_version_prunes_package_row() {
+        let (_d, db) = fresh_db();
+        db.replace_all(&[pkg("left-pad", &["1.0.0"])]).unwrap();
+
+        db.remove_versions("left-pad", Some(&["1.0.0".to_string()]))
+            .unwrap();
+
+        assert!(db.get_all_packages().unwrap().is_empty());
+    }
+
+    #[test]
+    fn remove_whole_package() {
+        let (_d, db) = fresh_db();
+        db.replace_all(&[
+            pkg("left-pad", &["1.0.0", "2.0.0"]),
+            pkg("right-pad", &["1.0.0"]),
+        ])
+        .unwrap();
+
+        db.remove_versions("left-pad", None).unwrap();
+
+        let names: Vec<String> = db
+            .get_all_packages()
+            .unwrap()
+            .into_iter()
+            .map(|p| p.name)
+            .collect();
+        assert_eq!(names, vec!["right-pad"]);
+    }
+}

@@ -562,3 +562,148 @@ impl RegistryClient {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use wiremock::matchers::{method, path, path_regex};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn s(v: &str) -> String {
+        v.to_string()
+    }
+
+    #[test]
+    fn max_version_picks_highest_semver() {
+        let vs = vec![s("1.0.0"), s("2.10.0"), s("2.9.1"), s("0.1.0")];
+        assert_eq!(
+            RegistryClient::max_version(vs.iter()),
+            Some(s("2.10.0"))
+        );
+    }
+
+    #[test]
+    fn max_version_falls_back_to_string_for_unparseable() {
+        let vs = vec![s("not-semver-b"), s("not-semver-a")];
+        assert_eq!(
+            RegistryClient::max_version(vs.iter()),
+            Some(s("not-semver-b"))
+        );
+    }
+
+    async fn mock_login(server: &MockServer) {
+        Mock::given(method("PUT"))
+            .and(path("/-/user/org.couchdb.user:cache-manager"))
+            .respond_with(
+                ResponseTemplate::new(201).set_body_json(json!({"token":"tok"})),
+            )
+            .mount(server)
+            .await;
+    }
+
+    fn packument() -> serde_json::Value {
+        json!({
+            "_rev": "1-abc",
+            "name": "left-pad",
+            "dist-tags": { "latest": "2.0.0" },
+            "versions": {
+                "1.0.0": { "name": "left-pad", "version": "1.0.0" },
+                "2.0.0": { "name": "left-pad", "version": "2.0.0" }
+            },
+            "time": { "1.0.0": "t1", "2.0.0": "t2" }
+        })
+    }
+
+    #[tokio::test]
+    async fn unpublish_single_version_puts_metadata_and_deletes_tarball() {
+        let server = MockServer::start().await;
+        mock_login(&server).await;
+        Mock::given(method("GET"))
+            .and(path("/left-pad"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(packument()))
+            .mount(&server)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path_regex(r"^/left-pad/-rev/"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok":true})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("DELETE"))
+            .and(path_regex(r"^/left-pad/-/left-pad-1\.0\.0\.tgz/-rev/"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = RegistryClient::new(&server.uri());
+        client
+            .unpublish_package("left-pad", Some("1.0.0"))
+            .await
+            .expect("unpublish should succeed");
+    }
+
+    #[tokio::test]
+    async fn unpublish_missing_package_is_idempotent() {
+        let server = MockServer::start().await;
+        mock_login(&server).await;
+        Mock::given(method("GET"))
+            .and(path("/gone"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+
+        let client = RegistryClient::new(&server.uri());
+        client
+            .unpublish_package("gone", Some("1.0.0"))
+            .await
+            .expect("missing package should be treated as already removed");
+    }
+
+    #[tokio::test]
+    async fn unpublish_whole_package_issues_delete() {
+        let server = MockServer::start().await;
+        mock_login(&server).await;
+        Mock::given(method("GET"))
+            .and(path("/left-pad"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(packument()))
+            .mount(&server)
+            .await;
+        Mock::given(method("DELETE"))
+            .and(path_regex(r"^/left-pad/-rev/"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = RegistryClient::new(&server.uri());
+        client
+            .unpublish_package("left-pad", None)
+            .await
+            .expect("whole-package unpublish should succeed");
+    }
+
+    #[tokio::test]
+    async fn deprecate_puts_updated_metadata() {
+        let server = MockServer::start().await;
+        mock_login(&server).await;
+        Mock::given(method("GET"))
+            .and(path("/left-pad"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(packument()))
+            .mount(&server)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path("/left-pad"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok":true})))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = RegistryClient::new(&server.uri());
+        client
+            .deprecate_package("left-pad", "1.0.0", "please upgrade")
+            .await
+            .expect("deprecate should succeed");
+    }
+}
