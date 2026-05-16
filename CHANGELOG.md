@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.1.23 (2026-05-16)
+
+### Features
+- 新增 Verdaccio 包 unpublish/deprecate 管理能力：支持右键单项与操作栏批量操作，单版本 unpublish 对齐 npm CLI 行为（PUT 后重取 _rev 再删 tarball、剥离 _attachments/_revisions、latest 被删时按 semver 重指、删末版本走整包删除），并同步清理本地缓存索引；切换数据源清空选择并按当前缓存过滤目标 (e53e903)
+
 ## v0.1.22 (2026-05-16)
 
 ### Bug Fixes
