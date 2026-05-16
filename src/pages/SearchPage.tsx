@@ -5,6 +5,7 @@ import {
   useLayoutEffect,
   useMemo,
   useRef,
+  type MouseEvent,
 } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useVirtualizer } from "@tanstack/react-virtual";
@@ -31,8 +32,25 @@ import {
   PopoverTrigger,
 } from "@/components/ui/popover";
 import { ExportDropdown } from "@/components/ExportDropdown";
+import { toast } from "sonner";
+import {
+  RowContextMenu,
+  type ContextMenuPosition,
+} from "@/components/RowContextMenu";
+import {
+  UnpublishConfirmDialog,
+  type ManageTarget,
+} from "@/components/UnpublishConfirmDialog";
+import { DeprecateConfirmDialog } from "@/components/DeprecateConfirmDialog";
 
 type SearchResult = CachedPackage;
+
+interface ContextMenuState {
+  position: ContextMenuPosition;
+  pkg: string;
+  version?: string;
+  cached: boolean;
+}
 
 interface ExpandedPackage {
   name: string;
@@ -76,6 +94,18 @@ export function SearchPage() {
   );
   const [stableOnly, setStableOnly] = useState(true);
   const [resolving, setResolving] = useState(false);
+  const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(
+    null
+  );
+  const [unpublishTargets, setUnpublishTargets] = useState<
+    ManageTarget[] | null
+  >(null);
+  const [deprecateTargets, setDeprecateTargets] = useState<
+    ManageTarget[] | null
+  >(null);
+  const [manageLoading, setManageLoading] = useState(false);
+
+  const isVerdaccio = source === "verdaccio";
 
   const registryUrl =
     source === "npmjs" ? "https://registry.npmjs.org" : config.registry_url;
@@ -84,6 +114,9 @@ export function SearchPage() {
     if (source === "npmjs") setResults([]);
     if (source === "verdaccio") loadCachedFromStore();
     setExpanded({});
+    // 切换数据源必须清空选择，否则 npmjs 选中的版本会被
+    // 带入 Verdaccio 的批量 Unpublish/Deprecate，对错误目标执行破坏性操作
+    setSelected(new Map());
   }, [source, loadCachedFromStore]);
 
   const filteredCached = useMemo(() => {
@@ -255,6 +288,87 @@ export function SearchPage() {
     }
   };
 
+  const collectSelectedTargets = (): ManageTarget[] => {
+    const targets: ManageTarget[] = [];
+    selected.forEach((versions, pkgName) => {
+      const cached = cachedVersionsByName.get(pkgName);
+      versions.forEach((v) => {
+        // 仅对当前 Verdaccio 索引中确实缓存的版本执行破坏性操作，
+        // 防止跨数据源残留 selection 命中错误目标
+        if (cached?.has(v)) targets.push({ name: pkgName, version: v });
+      });
+    });
+    return targets;
+  };
+
+  const runUnpublish = async (targets: ManageTarget[]) => {
+    setManageLoading(true);
+    const failures: string[] = [];
+    let ok = 0;
+    for (const t of targets) {
+      try {
+        await invoke("unpublish_package", {
+          name: t.name,
+          version: t.version ?? null,
+        });
+        ok += 1;
+      } catch (e) {
+        failures.push(
+          `${t.version ? `${t.name}@${t.version}` : t.name}: ${e}`
+        );
+      }
+    }
+    setManageLoading(false);
+    setUnpublishTargets(null);
+    if (ok > 0) {
+      toast.success(`已 unpublish ${ok} 项`);
+      setSelected(new Map());
+      const affected = new Set(targets.map((t) => t.name));
+      setExpanded((prev) => {
+        const next = { ...prev };
+        affected.forEach((n) => delete next[n]);
+        return next;
+      });
+      await loadCachedFromStore();
+    }
+    if (failures.length > 0) {
+      toast.error(`${failures.length} 项失败`, {
+        description: failures.slice(0, 5).join("\n"),
+      });
+    }
+  };
+
+  const runDeprecate = async (targets: ManageTarget[], message: string) => {
+    setManageLoading(true);
+    const failures: string[] = [];
+    let ok = 0;
+    for (const t of targets) {
+      if (!t.version) continue;
+      try {
+        await invoke("deprecate_package", {
+          name: t.name,
+          version: t.version,
+          message,
+        });
+        ok += 1;
+      } catch (e) {
+        failures.push(`${t.name}@${t.version}: ${e}`);
+      }
+    }
+    setManageLoading(false);
+    setDeprecateTargets(null);
+    if (ok > 0) {
+      toast.success(`已 deprecate ${ok} 个版本`);
+      setSelected(new Map());
+      await loadCachedFromStore();
+    }
+    if (failures.length > 0) {
+      toast.error(`${failures.length} 项失败`, {
+        description: failures.slice(0, 5).join("\n"),
+      });
+    }
+  };
+
   const getFilteredVersions = (versions: string[]) => {
     const filtered = stableOnly
       ? versions.filter(isStableVersion)
@@ -355,6 +469,18 @@ export function SearchPage() {
                     <div
                       className="flex cursor-pointer items-center gap-3 p-3 hover:bg-muted/50"
                       onClick={() => toggleExpand(pkg.name)}
+                      onContextMenu={
+                        isVerdaccio
+                          ? (e) => {
+                              e.preventDefault();
+                              setContextMenu({
+                                position: { x: e.clientX, y: e.clientY },
+                                pkg: pkg.name,
+                                cached: false,
+                              });
+                            }
+                          : undefined
+                      }
                     >
                       {expandedPackage ? (
                         <ChevronDown className="h-4 w-4 shrink-0" />
@@ -396,7 +522,22 @@ export function SearchPage() {
                                 const isSelected =
                                   selected.get(pkg.name)?.has(v) || false;
 
-                                if (isCached) {
+                                const openVersionMenu = (
+                                  e: MouseEvent
+                                ) => {
+                                  e.preventDefault();
+                                  setContextMenu({
+                                    position: {
+                                      x: e.clientX,
+                                      y: e.clientY,
+                                    },
+                                    pkg: pkg.name,
+                                    version: v,
+                                    cached: isCached,
+                                  });
+                                };
+
+                                if (isCached && !isVerdaccio) {
                                   return (
                                     <span
                                       key={v}
@@ -409,9 +550,39 @@ export function SearchPage() {
                                   );
                                 }
 
+                                if (isCached) {
+                                  return (
+                                    <label
+                                      key={v}
+                                      title="已缓存到 Verdaccio · 右键可管理"
+                                      onContextMenu={openVersionMenu}
+                                      className={`flex cursor-pointer items-center gap-1.5 rounded-md border px-2 py-1 text-sm transition-colors ${
+                                        isSelected
+                                          ? "border-emerald-500 bg-emerald-500/20"
+                                          : "border-emerald-500/40 bg-emerald-500/10 hover:bg-emerald-500/20"
+                                      } text-emerald-700 dark:text-emerald-400`}
+                                    >
+                                      <Checkbox
+                                        checked={isSelected}
+                                        onCheckedChange={() =>
+                                          toggleVersion(pkg.name, v)
+                                        }
+                                        className="h-3.5 w-3.5"
+                                      />
+                                      <Check className="h-3.5 w-3.5" />
+                                      <span>{v}</span>
+                                    </label>
+                                  );
+                                }
+
                                 return (
                                   <label
                                     key={v}
+                                    onContextMenu={
+                                      isVerdaccio
+                                        ? openVersionMenu
+                                        : undefined
+                                    }
                                     className={`flex cursor-pointer items-center gap-1.5 rounded-md border px-2 py-1 text-sm transition-colors ${
                                       isSelected
                                         ? "border-primary bg-primary/5"
@@ -518,6 +689,37 @@ export function SearchPage() {
             </PopoverContent>
           </Popover>
           <div className="flex gap-2">
+            {isVerdaccio && (
+              <>
+                <Button
+                  variant="destructive"
+                  onClick={() => {
+                    const t = collectSelectedTargets();
+                    if (t.length === 0) {
+                      toast.error("选中的版本不在当前 Verdaccio 缓存中");
+                      return;
+                    }
+                    setUnpublishTargets(t);
+                  }}
+                >
+                  Unpublish 选中
+                </Button>
+                <Button
+                  variant="outline"
+                  className="border-amber-500/40 text-amber-600 hover:bg-amber-500/10 hover:text-amber-600 dark:text-amber-500"
+                  onClick={() => {
+                    const t = collectSelectedTargets();
+                    if (t.length === 0) {
+                      toast.error("选中的版本不在当前 Verdaccio 缓存中");
+                      return;
+                    }
+                    setDeprecateTargets(t);
+                  }}
+                >
+                  Deprecate 选中
+                </Button>
+              </>
+            )}
             <ExportDropdown
               getSelectedPackages={() => {
                 const packages: { package_name: string; version: string }[] = [];
@@ -547,6 +749,88 @@ export function SearchPage() {
           </div>
         </div>
       )}
+
+      {contextMenu && (
+        <RowContextMenu
+          position={contextMenu.position}
+          onClose={() => setContextMenu(null)}
+          showManageActions={isVerdaccio}
+          onCache={
+            contextMenu.version && !contextMenu.cached
+              ? () =>
+                  startCacheTasks([
+                    {
+                      package_name: contextMenu.pkg,
+                      version: contextMenu.version!,
+                    },
+                  ])
+              : undefined
+          }
+          onCacheWithDeps={
+            contextMenu.version && !contextMenu.cached
+              ? async () => {
+                  const resolved = await resolveDependencies([
+                    {
+                      package_name: contextMenu.pkg,
+                      version: contextMenu.version!,
+                    },
+                  ]);
+                  await startCacheTasks(
+                    resolved.map((r) => ({
+                      package_name: r.package_name,
+                      version: r.version,
+                    }))
+                  );
+                }
+              : undefined
+          }
+          onUnpublish={
+            contextMenu.version && contextMenu.cached
+              ? () =>
+                  setUnpublishTargets([
+                    {
+                      name: contextMenu.pkg,
+                      version: contextMenu.version,
+                    },
+                  ])
+              : undefined
+          }
+          onDeprecate={
+            contextMenu.version && contextMenu.cached
+              ? () =>
+                  setDeprecateTargets([
+                    {
+                      name: contextMenu.pkg,
+                      version: contextMenu.version,
+                    },
+                  ])
+              : undefined
+          }
+          onUnpublishAll={
+            !contextMenu.version
+              ? () => setUnpublishTargets([{ name: contextMenu.pkg }])
+              : undefined
+          }
+        />
+      )}
+
+      <UnpublishConfirmDialog
+        open={unpublishTargets !== null}
+        targets={unpublishTargets ?? []}
+        loading={manageLoading}
+        onCancel={() => setUnpublishTargets(null)}
+        onConfirm={() => runUnpublish(unpublishTargets ?? [])}
+      />
+
+      <DeprecateConfirmDialog
+        open={deprecateTargets !== null}
+        targets={deprecateTargets ?? []}
+        loading={manageLoading}
+        onCancel={() => setDeprecateTargets(null)}
+        onConfirm={(message) =>
+          runDeprecate(deprecateTargets ?? [], message)
+        }
+      />
     </div>
   );
 }

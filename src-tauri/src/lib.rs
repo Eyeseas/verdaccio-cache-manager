@@ -584,6 +584,41 @@ async fn clear_cache_index(
     db.clear_all()
 }
 
+#[tauri::command]
+async fn unpublish_package(
+    app_handle: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    name: String,
+    version: Option<String>,
+) -> Result<(), String> {
+    let config = config::load_config(&app_handle);
+    let client = registry_client::RegistryClient::new(&config.registry_url);
+    client
+        .unpublish_package(&name, version.as_deref())
+        .await?;
+
+    let db = state.cache_db.lock().await;
+    match &version {
+        Some(v) => db.remove_versions(&name, Some(std::slice::from_ref(v)))?,
+        None => db.remove_versions(&name, None)?,
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn deprecate_package(
+    app_handle: tauri::AppHandle,
+    name: String,
+    version: String,
+    message: String,
+) -> Result<(), String> {
+    let config = config::load_config(&app_handle);
+    let client = registry_client::RegistryClient::new(&config.registry_url);
+    client
+        .deprecate_package(&name, &version, &message)
+        .await
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -657,6 +692,8 @@ pub fn run() {
             get_sync_info,
             clear_cache_index,
             download_tarballs,
+            unpublish_package,
+            deprecate_package,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

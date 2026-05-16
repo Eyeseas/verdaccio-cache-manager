@@ -313,6 +313,59 @@ impl CacheDb {
         Ok(total)
     }
 
+    /// 从本地索引移除指定版本。versions 为 None 时移除整个包。
+    /// 当包不再有缓存版本时，一并删除 packages 行。
+    pub fn remove_versions(
+        &self,
+        name: &str,
+        versions: Option<&[String]>,
+    ) -> Result<(), String> {
+        let tx = self
+            .conn
+            .unchecked_transaction()
+            .map_err(|e| format!("开启事务失败: {}", e))?;
+
+        match versions {
+            None => {
+                tx.execute(
+                    "DELETE FROM cached_versions WHERE package_name = ?1",
+                    params![name],
+                )
+                .map_err(|e| format!("删除版本失败: {}", e))?;
+                tx.execute(
+                    "DELETE FROM packages WHERE name = ?1",
+                    params![name],
+                )
+                .map_err(|e| format!("删除包失败: {}", e))?;
+            }
+            Some(vers) => {
+                for ver in vers {
+                    tx.execute(
+                        "DELETE FROM cached_versions WHERE package_name = ?1 AND version = ?2",
+                        params![name, ver],
+                    )
+                    .map_err(|e| format!("删除版本失败: {}", e))?;
+                }
+                let remaining: i64 = tx
+                    .query_row(
+                        "SELECT COUNT(*) FROM cached_versions WHERE package_name = ?1",
+                        params![name],
+                        |row| row.get(0),
+                    )
+                    .map_err(|e| format!("统计剩余版本失败: {}", e))?;
+                if remaining == 0 {
+                    tx.execute(
+                        "DELETE FROM packages WHERE name = ?1",
+                        params![name],
+                    )
+                    .map_err(|e| format!("删除包失败: {}", e))?;
+                }
+            }
+        }
+
+        tx.commit().map_err(|e| format!("提交事务失败: {}", e))
+    }
+
     pub fn clear_all(&self) -> Result<(), String> {
         self.conn
             .execute_batch(

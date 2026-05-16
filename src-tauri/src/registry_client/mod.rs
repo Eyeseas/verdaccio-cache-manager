@@ -234,6 +234,277 @@ impl RegistryClient {
         }
     }
 
+    fn apply_auth(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        if let Some(token) = self.token.get() {
+            if token.starts_with("Basic ") {
+                return req.header("authorization", token.as_str());
+            }
+            return req.header("authorization", format!("Bearer {}", token));
+        }
+        req
+    }
+
+    async fn fetch_packument(&self, name: &str) -> Result<serde_json::Value, String> {
+        let url = format!("{}/{}", self.registry_url, name);
+        let resp = self
+            .apply_auth(self.http.get(&url))
+            .header("accept", "application/json")
+            .send()
+            .await
+            .map_err(|e| format!("获取包元数据失败: {}", e))?;
+
+        let status = resp.status();
+        if status.as_u16() == 404 {
+            return Err(format!("包 {} 不存在", name));
+        }
+        if !status.is_success() {
+            return Err(format!("获取包元数据失败 (HTTP {})", status));
+        }
+        resp.json()
+            .await
+            .map_err(|e| format!("解析包元数据失败: {}", e))
+    }
+
+    /// 从一组版本号中按 semver 选出最大版本，解析失败时回退到字符串比较。
+    fn max_version<'a, I: Iterator<Item = &'a String>>(
+        versions: I,
+    ) -> Option<String> {
+        let mut best: Option<(Option<node_semver::Version>, String)> = None;
+        for v in versions {
+            let parsed = node_semver::Version::parse(v).ok();
+            let take = match (&best, &parsed) {
+                (None, _) => true,
+                (Some((Some(b), _)), Some(p)) => p > b,
+                (Some((Some(_), _)), None) => false,
+                (Some((None, b)), _) => v.as_str() > b.as_str(),
+            };
+            if take {
+                best = Some((parsed, v.clone()));
+            }
+        }
+        best.map(|(_, s)| s)
+    }
+
+    /// 整包删除：DELETE /{name}/-rev/{rev}，404 视为已删除（幂等）。
+    async fn delete_whole_package(
+        &self,
+        name: &str,
+        rev: &str,
+    ) -> Result<(), String> {
+        let url = format!("{}/{}/-rev/{}", self.registry_url, name, rev);
+        let resp = self
+            .apply_auth(self.http.delete(&url))
+            .send()
+            .await
+            .map_err(|e| format!("删除包失败: {}", e))?;
+        if resp.status().as_u16() == 404 {
+            return Ok(());
+        }
+        self.check_manage_response(resp, name, None).await
+    }
+
+    fn tarball_filename(name: &str, version: &str) -> String {
+        let name_part = name.rsplit('/').next().unwrap_or(name);
+        format!("{}-{}.tgz", name_part, version)
+    }
+
+    /// 删除磁盘上的 tarball。404 视为已删除（幂等）。
+    async fn delete_tarball(
+        &self,
+        name: &str,
+        version: &str,
+        rev: &str,
+    ) -> Result<(), String> {
+        let filename = Self::tarball_filename(name, version);
+        let url = format!(
+            "{}/{}/-/{}/-rev/{}",
+            self.registry_url, name, filename, rev
+        );
+        let resp = self
+            .apply_auth(self.http.delete(&url))
+            .send()
+            .await
+            .map_err(|e| format!("删除 tarball 失败: {}", e))?;
+        let status = resp.status();
+        if status.is_success() || status.as_u16() == 404 {
+            return Ok(());
+        }
+        match status.as_u16() {
+            401 | 403 => Err(format!("权限不足，无法删除 {}@{}", name, version)),
+            _ => {
+                let text = resp.text().await.unwrap_or_default();
+                Err(format!("删除 tarball 失败 ({}): {}", status, text))
+            }
+        }
+    }
+
+    /// 删除指定版本。version 为 None 时删除整个包。
+    ///
+    /// 单版本流程必须同时更新 packument 元数据并物理删除 tarball：
+    /// Verdaccio 的缓存索引由存储目录中的 .tgz 文件决定，若只改元数据
+    /// 而保留 tarball，下次扫描会把版本重新索引回来。操作设计为幂等，
+    /// 元数据中已无该版本时不报错，继续清理残留的 tarball。
+    pub async fn unpublish_package(
+        &self,
+        name: &str,
+        version: Option<&str>,
+    ) -> Result<(), String> {
+        self.ensure_token().await?;
+
+        let doc = match self.fetch_packument(name).await {
+            Ok(d) => d,
+            // 包已不存在：视为已删除，交由上层清理本地索引
+            Err(e) if e.contains("不存在") => return Ok(()),
+            Err(e) => return Err(e),
+        };
+        let rev = doc["_rev"]
+            .as_str()
+            .unwrap_or("0-0000000000000000")
+            .to_string();
+
+        let ver = match version {
+            None => return self.delete_whole_package(name, &rev).await,
+            Some(v) => v,
+        };
+
+        let in_meta = doc["versions"]
+            .get(ver)
+            .map(|v| !v.is_null())
+            .unwrap_or(false);
+
+        // 删除最后一个版本等价于整包 unpublish（对齐 npm CLI 行为）
+        let remaining: Vec<String> = doc["versions"]
+            .as_object()
+            .map(|o| o.keys().filter(|k| k.as_str() != ver).cloned().collect())
+            .unwrap_or_default();
+        if in_meta && remaining.is_empty() {
+            return self.delete_whole_package(name, &rev).await;
+        }
+
+        // 当前用于删 tarball 的 rev；PUT 成功后会刷新为最新值
+        let mut tarball_rev = rev.clone();
+
+        if in_meta {
+            let mut doc = doc;
+            if let Some(obj) = doc["versions"].as_object_mut() {
+                obj.remove(ver);
+            }
+            if let Some(obj) = doc["time"].as_object_mut() {
+                obj.remove(ver);
+            }
+            // CouchDB 风格的内部字段不应随 unpublish 写回（对齐 libnpmpublish）
+            if let Some(map) = doc.as_object_mut() {
+                map.remove("_attachments");
+                map.remove("_revisions");
+            }
+            // 仅当被删版本是某个 dist-tag 时移除该 tag；
+            // 若移除的是 latest，则把 latest 指向剩余最高版本。
+            let removed_latest = doc["dist-tags"]["latest"].as_str()
+                == Some(ver);
+            if let Some(tags) = doc["dist-tags"].as_object_mut() {
+                let stale: Vec<String> = tags
+                    .iter()
+                    .filter(|(_, v)| v.as_str() == Some(ver))
+                    .map(|(k, _)| k.clone())
+                    .collect();
+                for k in stale {
+                    tags.remove(&k);
+                }
+            }
+            if removed_latest {
+                if let Some(latest) =
+                    Self::max_version(remaining.iter())
+                {
+                    doc["dist-tags"]["latest"] =
+                        serde_json::Value::String(latest);
+                }
+            }
+
+            let url =
+                format!("{}/{}/-rev/{}", self.registry_url, name, rev);
+            let resp = self
+                .apply_auth(self.http.put(&url))
+                .header("content-type", "application/json")
+                .json(&doc)
+                .send()
+                .await
+                .map_err(|e| format!("提交修改失败: {}", e))?;
+            // 404 表示元数据侧已无该版本，继续删 tarball
+            if resp.status().as_u16() != 404 {
+                self.check_manage_response(resp, name, Some(ver)).await?;
+            }
+
+            // PUT 成功后 revision 已变化，重新拉取以拿到最新 _rev，
+            // 否则 tarball DELETE 易因 rev 过期失败或留下半完成状态。
+            match self.fetch_packument(name).await {
+                Ok(fresh) => {
+                    if let Some(r) = fresh["_rev"].as_str() {
+                        tarball_rev = r.to_string();
+                    }
+                }
+                // 包整体已不存在：tarball 也已随之删除
+                Err(e) if e.contains("不存在") => return Ok(()),
+                Err(_) => {}
+            }
+        }
+
+        // 物理删除 tarball，避免存储扫描重新索引
+        self.delete_tarball(name, ver, &tarball_rev).await
+    }
+
+    /// 标记指定版本为废弃。
+    pub async fn deprecate_package(
+        &self,
+        name: &str,
+        version: &str,
+        message: &str,
+    ) -> Result<(), String> {
+        self.ensure_token().await?;
+        let mut doc = self.fetch_packument(name).await?;
+
+        let target = doc
+            .get_mut("versions")
+            .and_then(|v| v.get_mut(version))
+            .filter(|v| !v.is_null())
+            .ok_or_else(|| format!("版本 {}@{} 不存在", name, version))?;
+        target["deprecated"] = serde_json::Value::String(message.to_string());
+
+        let url = format!("{}/{}", self.registry_url, name);
+        let resp = self
+            .apply_auth(self.http.put(&url))
+            .header("content-type", "application/json")
+            .json(&doc)
+            .send()
+            .await
+            .map_err(|e| format!("提交修改失败: {}", e))?;
+        self.check_manage_response(resp, name, Some(version)).await
+    }
+
+    async fn check_manage_response(
+        &self,
+        resp: reqwest::Response,
+        name: &str,
+        version: Option<&str>,
+    ) -> Result<(), String> {
+        if resp.status().is_success() {
+            return Ok(());
+        }
+        let status = resp.status();
+        let target = match version {
+            Some(v) => format!("{}@{}", name, v),
+            None => name.to_string(),
+        };
+        match status.as_u16() {
+            401 | 403 => Err(format!("权限不足，无法操作 {}", target)),
+            404 => Err(format!("{} 不存在", target)),
+            409 => Err(format!("操作冲突，请刷新后重试 ({})", target)),
+            _ => {
+                let text = resp.text().await.unwrap_or_default();
+                Err(format!("操作失败 ({}): {}", status, text))
+            }
+        }
+    }
+
     pub async fn publish_package(
         &self,
         name: &str,

@@ -1,6 +1,14 @@
 import { useState, useEffect, useRef } from "react";
 import { createPortal } from "react-dom";
-import { Package, Boxes, Download, Box, ChevronRight } from "lucide-react";
+import {
+  Package,
+  Boxes,
+  Download,
+  Box,
+  ChevronRight,
+  Trash2,
+  AlertTriangle,
+} from "lucide-react";
 import { positionContextMenu } from "./rowContextMenuLogic";
 
 export interface ContextMenuPosition {
@@ -11,12 +19,16 @@ export interface ContextMenuPosition {
 export interface RowContextMenuProps {
   position: ContextMenuPosition;
   onClose: () => void;
-  onCache: () => void;
-  onCacheWithDeps: () => void;
-  onExportTarball: () => void;
-  onExportTarballWithDeps: () => void;
+  onCache?: () => void;
+  onCacheWithDeps?: () => void;
+  onExportTarball?: () => void;
+  onExportTarballWithDeps?: () => void;
   cacheDisabled?: boolean;
   exportDisabled?: boolean;
+  showManageActions?: boolean;
+  onUnpublish?: () => void;
+  onDeprecate?: () => void;
+  onUnpublishAll?: () => void;
 }
 
 const itemClass =
@@ -31,6 +43,10 @@ export function RowContextMenu({
   onExportTarballWithDeps,
   cacheDisabled,
   exportDisabled,
+  showManageActions,
+  onUnpublish,
+  onDeprecate,
+  onUnpublishAll,
 }: RowContextMenuProps) {
   const menuRef = useRef<HTMLDivElement>(null);
   const subMenuRef = useRef<HTMLDivElement>(null);
@@ -84,7 +100,8 @@ export function RowContextMenu({
     );
   }, [position, subOpen]);
 
-  const handleAction = (action: () => void) => {
+  const handleAction = (action?: () => void) => {
+    if (!action) return;
     onClose();
     action();
   };
@@ -106,23 +123,31 @@ export function RowContextMenu({
       className="fixed z-50 min-w-40 rounded-lg bg-popover p-1 text-popover-foreground shadow-md ring-1 ring-foreground/10 animate-in fade-in-0 zoom-in-95"
       style={{ top: layout.top, left: layout.left }}
     >
-      <button
-        className={itemClass}
-        onClick={() => handleAction(onCache)}
-        disabled={cacheDisabled}
-      >
-        <Package className="h-4 w-4" />
-        缓存
-      </button>
-      <button
-        className={itemClass}
-        onClick={() => handleAction(onCacheWithDeps)}
-        disabled={cacheDisabled}
-      >
-        <Boxes className="h-4 w-4" />
-        缓存及依赖
-      </button>
-      <div className="-mx-1 my-1 h-px bg-border" />
+      {onCache && (
+        <button
+          className={itemClass}
+          onClick={() => handleAction(onCache)}
+          disabled={cacheDisabled}
+        >
+          <Package className="h-4 w-4" />
+          缓存
+        </button>
+      )}
+      {onCacheWithDeps && (
+        <button
+          className={itemClass}
+          onClick={() => handleAction(onCacheWithDeps)}
+          disabled={cacheDisabled}
+        >
+          <Boxes className="h-4 w-4" />
+          缓存及依赖
+        </button>
+      )}
+      {(onCache || onCacheWithDeps) &&
+        (onExportTarball || onExportTarballWithDeps) && (
+          <div className="-mx-1 my-1 h-px bg-border" />
+        )}
+      {(onExportTarball || onExportTarballWithDeps) && (
       <div
         className="relative"
         onMouseEnter={openSub}
@@ -150,25 +175,68 @@ export function RowContextMenu({
             onMouseEnter={keepSub}
             onMouseLeave={closeSub}
           >
-            <button
-              className={itemClass}
-              onClick={() => handleAction(onExportTarball)}
-              disabled={exportDisabled}
-            >
-              <Box className="h-4 w-4" />
-              仅导出该包
-            </button>
-            <button
-              className={itemClass}
-              onClick={() => handleAction(onExportTarballWithDeps)}
-              disabled={exportDisabled}
-            >
-              <Boxes className="h-4 w-4" />
-              导出该包及其依赖
-            </button>
+            {onExportTarball && (
+              <button
+                className={itemClass}
+                onClick={() => handleAction(onExportTarball)}
+                disabled={exportDisabled}
+              >
+                <Box className="h-4 w-4" />
+                仅导出该包
+              </button>
+            )}
+            {onExportTarballWithDeps && (
+              <button
+                className={itemClass}
+                onClick={() => handleAction(onExportTarballWithDeps)}
+                disabled={exportDisabled}
+              >
+                <Boxes className="h-4 w-4" />
+                导出该包及其依赖
+              </button>
+            )}
           </div>
         )}
       </div>
+      )}
+      {showManageActions &&
+        (onUnpublish || onDeprecate || onUnpublishAll) && (
+          <>
+            {(onCache ||
+              onCacheWithDeps ||
+              onExportTarball ||
+              onExportTarballWithDeps) && (
+              <div className="-mx-1 my-1 h-px bg-border" />
+            )}
+            {onUnpublish && (
+              <button
+                className={`${itemClass} text-destructive hover:bg-destructive/10 hover:text-destructive`}
+                onClick={() => handleAction(onUnpublish)}
+              >
+                <Trash2 className="h-4 w-4" />
+                Unpublish 此版本
+              </button>
+            )}
+            {onDeprecate && (
+              <button
+                className={`${itemClass} text-amber-600 hover:bg-amber-500/10 hover:text-amber-600 dark:text-amber-500 dark:hover:text-amber-500`}
+                onClick={() => handleAction(onDeprecate)}
+              >
+                <AlertTriangle className="h-4 w-4" />
+                Deprecate 此版本
+              </button>
+            )}
+            {onUnpublishAll && (
+              <button
+                className={`${itemClass} text-destructive hover:bg-destructive/10 hover:text-destructive`}
+                onClick={() => handleAction(onUnpublishAll)}
+              >
+                <Trash2 className="h-4 w-4" />
+                Unpublish 整个包
+              </button>
+            )}
+          </>
+        )}
     </div>,
     document.body
   );
