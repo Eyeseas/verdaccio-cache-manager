@@ -23,7 +23,7 @@ use task_engine::{CacheTask, TaskEngine, TaskStatus};
 use tokio::sync::Mutex;
 
 struct AppState {
-    task_engine: Arc<Mutex<Option<TaskEngine>>>,
+    task_engine: Arc<Mutex<Option<Arc<TaskEngine>>>>,
     cache_db: Arc<Mutex<CacheDb>>,
     sync_engine: Arc<SyncEngine>,
 }
@@ -141,19 +141,16 @@ async fn start_cache_tasks(
     let source_registry = "https://registry.npmjs.org".to_string();
     let target_registry = config.registry_url.clone();
 
+    let engine = Arc::new(engine);
     {
         let mut lock = state.task_engine.lock().await;
-        *lock = Some(engine);
+        *lock = Some(engine.clone());
     }
 
-    let engine_ref = state.task_engine.clone();
     let app = app_handle.clone();
 
     tokio::spawn(async move {
-        let engine = engine_ref.lock().await;
-        if let Some(ref eng) = *engine {
-            eng.execute_all(app, source_registry, target_registry).await;
-        }
+        engine.execute_all(app, source_registry, target_registry).await;
     });
 
     Ok(())
@@ -177,25 +174,24 @@ async fn retry_failed_tasks(
     state: tauri::State<'_, AppState>,
 ) -> Result<(), String> {
     let config = config::load_config(&app_handle);
-    let engine_ref = state.task_engine.clone();
 
-    {
-        let lock = engine_ref.lock().await;
-        if let Some(ref engine) = *lock {
-            engine.retry_failed().await;
-        }
+    let engine = {
+        let lock = state.task_engine.lock().await;
+        lock.clone()
+    };
+
+    if let Some(ref eng) = engine {
+        eng.retry_failed().await;
+
+        let source_registry = "https://registry.npmjs.org".to_string();
+        let target_registry = config.registry_url.clone();
+        let app = app_handle.clone();
+        let eng = eng.clone();
+
+        tokio::spawn(async move {
+            eng.execute_all(app, source_registry, target_registry).await;
+        });
     }
-
-    let source_registry = "https://registry.npmjs.org".to_string();
-    let target_registry = config.registry_url.clone();
-    let app = app_handle.clone();
-
-    tokio::spawn(async move {
-        let lock = engine_ref.lock().await;
-        if let Some(ref engine) = *lock {
-            engine.execute_all(app, source_registry, target_registry).await;
-        }
-    });
 
     Ok(())
 }
@@ -416,20 +412,17 @@ async fn upload_tgz_files(
 
     let target_registry = config.registry_url.clone();
 
+    let engine = Arc::new(engine);
     {
         let mut lock = state.task_engine.lock().await;
-        *lock = Some(engine);
+        *lock = Some(engine.clone());
     }
 
-    let engine_ref = state.task_engine.clone();
     let app = app_handle.clone();
 
     tokio::spawn(async move {
-        let lock = engine_ref.lock().await;
-        if let Some(ref eng) = *lock {
-            eng.execute_all(app, "file://local".to_string(), target_registry)
-                .await;
-        }
+        engine.execute_all(app, "file://local".to_string(), target_registry)
+            .await;
     });
 
     Ok(())
