@@ -5,3 +5,4 @@ target/
 *.log
 .ace-tool/
 .serena/
+.superpowers
