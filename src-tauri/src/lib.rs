@@ -28,6 +28,24 @@ struct AppState {
     sync_engine: Arc<SyncEngine>,
 }
 
+const VERDACCIO_PLUGIN_RESOURCE_PATH: &str = "resources/verdaccio-cached-list.tgz";
+
+#[derive(Debug, Clone, Serialize)]
+struct VerdaccioPluginInfo {
+    name: String,
+    version: String,
+    filename: String,
+}
+
+fn verdaccio_plugin_info_from_package(pkg: LocalPackage) -> VerdaccioPluginInfo {
+    let filename = format!("{}-{}.tgz", pkg.name, pkg.version);
+    VerdaccioPluginInfo {
+        name: pkg.name,
+        version: pkg.version,
+        filename,
+    }
+}
+
 #[tauri::command]
 fn get_config(app_handle: tauri::AppHandle) -> AppConfig {
     config::load_config(&app_handle)
@@ -612,6 +630,72 @@ async fn deprecate_package(
         .await
 }
 
+#[tauri::command]
+async fn export_verdaccio_plugin(
+    app_handle: tauri::AppHandle,
+    output_path: String,
+) -> Result<String, String> {
+    use tokio::fs;
+
+    let resource_path = app_handle
+        .path()
+        .resolve(VERDACCIO_PLUGIN_RESOURCE_PATH, tauri::path::BaseDirectory::Resource)
+        .map_err(|e| format!("无法定位内置插件包: {}", e))?;
+
+    let output = PathBuf::from(&output_path);
+    if let Some(parent) = output.parent() {
+        fs::create_dir_all(parent)
+            .await
+            .map_err(|e| format!("创建导出目录失败: {}", e))?;
+    }
+
+    fs::copy(&resource_path, &output)
+        .await
+        .map_err(|e| format!("导出插件包失败: {}", e))?;
+
+    Ok(output.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+async fn get_verdaccio_plugin_info(
+    app_handle: tauri::AppHandle,
+) -> Result<VerdaccioPluginInfo, String> {
+    let resource_path = app_handle
+        .path()
+        .resolve(VERDACCIO_PLUGIN_RESOURCE_PATH, tauri::path::BaseDirectory::Resource)
+        .map_err(|e| format!("无法定位内置插件包: {}", e))?;
+
+    let pkg = local_scanner::parse_tgz_metadata(&resource_path)
+        .map_err(|e| format!("读取内置插件包信息失败: {}", e))?;
+
+    Ok(verdaccio_plugin_info_from_package(pkg))
+}
+
+#[cfg(test)]
+mod plugin_export_tests {
+    use super::*;
+
+    #[test]
+    fn verdaccio_plugin_resource_path_is_stable_across_plugin_versions() {
+        assert_eq!(VERDACCIO_PLUGIN_RESOURCE_PATH, "resources/verdaccio-cached-list.tgz");
+    }
+
+    #[test]
+    fn verdaccio_plugin_info_uses_package_metadata_for_export_filename() {
+        let pkg = LocalPackage {
+            name: "verdaccio-cached-list".to_string(),
+            version: "0.2.0".to_string(),
+            path: PathBuf::from("ignored.tgz"),
+        };
+
+        let info = verdaccio_plugin_info_from_package(pkg);
+
+        assert_eq!(info.name, "verdaccio-cached-list");
+        assert_eq!(info.version, "0.2.0");
+        assert_eq!(info.filename, "verdaccio-cached-list-0.2.0.tgz");
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -687,6 +771,8 @@ pub fn run() {
             download_tarballs,
             unpublish_package,
             deprecate_package,
+            export_verdaccio_plugin,
+            get_verdaccio_plugin_info,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
-import { open } from "@tauri-apps/plugin-dialog";
+import { invoke } from "@tauri-apps/api/core";
+import { open, save } from "@tauri-apps/plugin-dialog";
 import { getVersion } from "@tauri-apps/api/app";
 import { check } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
@@ -26,8 +27,15 @@ import {
   Database,
   Settings2,
   Heart,
+  PackageOpen,
 } from "lucide-react";
 import { toast } from "sonner";
+
+type VerdaccioPluginInfo = {
+  name: string;
+  version: string;
+  filename: string;
+};
 
 export function SettingsPage() {
   const { config, loadConfig, saveConfig, testConnection } = useConfigStore();
@@ -42,6 +50,7 @@ export function SettingsPage() {
   const [saving, setSaving] = useState(false);
   const [version, setVersion] = useState("");
   const [checking, setChecking] = useState(false);
+  const [exportingPlugin, setExportingPlugin] = useState(false);
 
   useEffect(() => {
     loadConfig();
@@ -97,6 +106,39 @@ export function SettingsPage() {
       toast.error("检查更新失败", { description: String(e) });
     } finally {
       setChecking(false);
+    }
+  };
+
+  const handleExportPlugin = async () => {
+    setExportingPlugin(true);
+    try {
+      const pluginInfo = await invoke<VerdaccioPluginInfo>(
+        "get_verdaccio_plugin_info"
+      );
+      const selected = await save({
+        defaultPath: pluginInfo.filename,
+        filters: [
+          {
+            name: "npm package",
+            extensions: ["tgz"],
+          },
+        ],
+      });
+
+      if (!selected) return;
+
+      const exportedPath = await invoke<string>("export_verdaccio_plugin", {
+        outputPath: selected,
+      });
+
+      toast.success("插件包已导出", {
+        description: `离线安装: npm install -g ${exportedPath}`,
+        duration: 10000,
+      });
+    } catch (e) {
+      toast.error("导出插件包失败", { description: String(e) });
+    } finally {
+      setExportingPlugin(false);
     }
   };
 
@@ -203,6 +245,41 @@ export function SettingsPage() {
                 SMB/NFS/sshfs 挂载目录。安装了 verdaccio-cached-list
                 插件则可不填。
               </p>
+            </div>
+          </CardContent>
+        </Card>
+
+        {/* Verdaccio Plugin */}
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              <PackageOpen className="h-4 w-4" />
+              Verdaccio 插件
+            </CardTitle>
+            <CardDescription>
+              导出内置 verdaccio-cached-list 插件包，用于让应用读取 proxy 缓存包索引
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <div className="flex items-center justify-between gap-4">
+              <div className="space-y-1">
+                <p className="text-sm">离线安装包</p>
+                <p className="text-xs text-muted-foreground">
+                  导出后在 Verdaccio 所在环境执行 npm install -g 安装，并在 config.yaml 中启用 cached-list middleware。
+                </p>
+              </div>
+              <Button
+                variant="outline"
+                onClick={handleExportPlugin}
+                disabled={exportingPlugin}
+              >
+                {exportingPlugin ? (
+                  <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+                ) : (
+                  <PackageOpen className="mr-1.5 h-3.5 w-3.5" />
+                )}
+                {exportingPlugin ? "导出中" : "导出插件包"}
+              </Button>
             </div>
           </CardContent>
         </Card>
