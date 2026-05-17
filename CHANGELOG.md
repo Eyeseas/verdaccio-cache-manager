@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.1.25 (2026-05-17)
+
+### Features
+- 设置页新增「Verdaccio 插件」卡片，可导出内置 verdaccio-cached-list 离线插件包，导出文件名由 tarball 元数据自动派生 (9bd4406)
+
 ## v0.1.24 (2026-05-17)
 
 ### Features
