@@ -25,6 +25,7 @@ import {
   Check,
   PackageCheck,
   X,
+  Copy,
 } from "lucide-react";
 import {
   Popover,
@@ -70,6 +71,36 @@ function formatRelativeTime(ts: number): string {
   if (diffSec < 3600) return `${Math.floor(diffSec / 60)} 分钟前`;
   if (diffSec < 86400) return `${Math.floor(diffSec / 3600)} 小时前`;
   return new Date(ts).toLocaleString();
+}
+
+function CopyNameButton({ name }: { name: string }) {
+  const [copied, setCopied] = useState(false);
+
+  const handleCopy = async (e: MouseEvent) => {
+    e.stopPropagation();
+    try {
+      await navigator.clipboard.writeText(name);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      toast.error("复制失败");
+    }
+  };
+
+  return (
+    <button
+      type="button"
+      title="复制包名"
+      onClick={handleCopy}
+      className="shrink-0 rounded p-1 text-muted-foreground opacity-0 transition-opacity hover:bg-muted hover:text-foreground group-hover:opacity-100"
+    >
+      {copied ? (
+        <Check className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400" />
+      ) : (
+        <Copy className="h-3.5 w-3.5" />
+      )}
+    </button>
+  );
 }
 
 export function SearchPage() {
@@ -467,7 +498,7 @@ export function SearchPage() {
                 >
                   <div className="rounded-lg border">
                     <div
-                      className="flex cursor-pointer items-center gap-3 p-3 hover:bg-muted/50"
+                      className="group flex cursor-pointer items-center gap-3 p-3 hover:bg-muted/50"
                       onClick={() => toggleExpand(pkg.name)}
                       onContextMenu={
                         isVerdaccio
@@ -490,6 +521,7 @@ export function SearchPage() {
                       <div className="min-w-0 flex-1">
                         <div className="flex items-center gap-2">
                           <span className="font-medium">{pkg.name}</span>
+                          <CopyNameButton name={pkg.name} />
                           {pkg.latest_version && (
                             <Badge variant="secondary">
                               {pkg.latest_version}
