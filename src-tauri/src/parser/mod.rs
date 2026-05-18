@@ -232,6 +232,36 @@ pub fn detect_and_parse(file_path: &Path) -> Result<Vec<ParsedDependency>, Strin
     }
 }
 
+/// 解析单个依赖的 raw range 为具体版本。已是 x.y.z 直接短路；否则查共享
+/// 版本缓存，未命中则请求 registry 并回填缓存。无法满足或请求失败时返回 None。
+pub async fn resolve_single(
+    http: &reqwest::Client,
+    sem: &Arc<Semaphore>,
+    cache: &Arc<Mutex<HashMap<String, Arc<Vec<String>>>>>,
+    name: &str,
+    raw_range: &str,
+) -> Option<String> {
+    if let Some(v) = pinned_version(raw_range) {
+        return Some(v);
+    }
+
+    let versions = {
+        let map = cache.lock().await;
+        map.get(name).cloned()
+    };
+    let versions = match versions {
+        Some(v) => v,
+        None => {
+            let fetched = fetch_versions(http, sem, name).await.ok()?;
+            let arc = Arc::new(fetched);
+            cache.lock().await.insert(name.to_string(), arc.clone());
+            arc
+        }
+    };
+
+    resolve_max_satisfying(raw_range, &versions)
+}
+
 /// Resolves raw semver ranges in dependency entries to concrete versions by
 /// querying the npm registry. Already-pinned x.y.z versions short-circuit.
 /// Entries whose range can't be satisfied are dropped silently.
@@ -247,30 +277,7 @@ pub async fn resolve_version_ranges(deps: Vec<ParsedDependency>) -> Vec<ParsedDe
         let sem = sem.clone();
         let cache = versions_cache.clone();
         handles.push(tokio::spawn(async move {
-            // Short-circuit: already a concrete x.y.z version.
-            if let Some(v) = pinned_version(&dep.version) {
-                return Some(ParsedDependency {
-                    name: dep.name,
-                    version: v,
-                    tarball_url: dep.tarball_url,
-                });
-            }
-
-            let versions = {
-                let map = cache.lock().await;
-                map.get(&dep.name).cloned()
-            };
-            let versions = match versions {
-                Some(v) => v,
-                None => {
-                    let fetched = fetch_versions(&http, &sem, &dep.name).await.ok()?;
-                    let arc = Arc::new(fetched);
-                    cache.lock().await.insert(dep.name.clone(), arc.clone());
-                    arc
-                }
-            };
-
-            let resolved = resolve_max_satisfying(&dep.version, &versions)?;
+            let resolved = resolve_single(&http, &sem, &cache, &dep.name, &dep.version).await?;
             Some(ParsedDependency {
                 name: dep.name,
                 version: resolved,

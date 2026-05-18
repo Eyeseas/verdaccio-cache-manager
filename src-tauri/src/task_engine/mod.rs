@@ -5,7 +5,7 @@ use std::time::Duration;
 use tauri::{AppHandle, Emitter};
 use tokio::sync::{Mutex, Semaphore};
 
-use crate::registry_client::RegistryClient;
+use crate::registry_client::{tarball_url, RegistryClient};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TaskStatus {
@@ -225,9 +225,10 @@ async fn execute_publish(
 ) {
     let tarball_url = match &task.tarball_url {
         Some(url) => url.clone(),
-        None => format!(
-            "{}/{}/-/{}-{}.tgz",
-            source_client.registry_url, task.package_name, task.package_name, task.version
+        None => tarball_url(
+            &source_client.registry_url,
+            &task.package_name,
+            &task.version,
         ),
     };
 
@@ -315,7 +316,7 @@ async fn execute_publish(
         "name": task.package_name,
         "version": task.version,
         "dist": {
-            "tarball": format!("{}/{}/-/{}-{}.tgz", target_client.registry_url, task.package_name, task.package_name, task.version)
+            "tarball": crate::registry_client::tarball_url(&target_client.registry_url, &task.package_name, &task.version)
         }
     });
 

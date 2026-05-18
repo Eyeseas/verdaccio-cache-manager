@@ -25,6 +25,23 @@ pub struct RegistryClient {
     token: OnceCell<String>,
 }
 
+/// npm tarball 文件名：scoped 包只取最后一段（`@scope/name` → `name-x.y.z.tgz`），
+/// 对齐 npm registry 的 `/{name}/-/{filename}` 路径约定。
+pub fn tarball_filename(name: &str, version: &str) -> String {
+    let name_part = name.rsplit('/').next().unwrap_or(name);
+    format!("{}-{}.tgz", name_part, version)
+}
+
+/// 完整 tarball URL：`{registry}/{name}/-/{filename}`。
+pub fn tarball_url(registry_url: &str, name: &str, version: &str) -> String {
+    format!(
+        "{}/{}/-/{}",
+        registry_url.trim_end_matches('/'),
+        name,
+        tarball_filename(name, version)
+    )
+}
+
 impl RegistryClient {
     pub fn new(registry_url: &str) -> Self {
         Self {
@@ -207,19 +224,11 @@ impl RegistryClient {
     }
 
     pub async fn trigger_proxy_cache(&self, package_name: &str, version: &str) -> Result<(), String> {
-        let name_part = if package_name.starts_with('@') {
-            package_name.split('/').last().unwrap_or(package_name)
-        } else {
-            package_name
-        };
-        let tarball_url = format!(
-            "{}/{}/-/{}-{}.tgz",
-            self.registry_url, package_name, name_part, version
-        );
+        let url = tarball_url(&self.registry_url, package_name, version);
 
         let resp = self
             .http
-            .get(&tarball_url)
+            .get(&url)
             .send()
             .await
             .map_err(|e| format!("代理缓存请求失败: {}", e))?;
@@ -303,11 +312,6 @@ impl RegistryClient {
         self.check_manage_response(resp, name, None).await
     }
 
-    fn tarball_filename(name: &str, version: &str) -> String {
-        let name_part = name.rsplit('/').next().unwrap_or(name);
-        format!("{}-{}.tgz", name_part, version)
-    }
-
     /// 删除磁盘上的 tarball。404 视为已删除（幂等）。
     async fn delete_tarball(
         &self,
@@ -315,7 +319,7 @@ impl RegistryClient {
         version: &str,
         rev: &str,
     ) -> Result<(), String> {
-        let filename = Self::tarball_filename(name, version);
+        let filename = tarball_filename(name, version);
         let url = format!(
             "{}/{}/-/{}/-rev/{}",
             self.registry_url, name, filename, rev
@@ -563,6 +567,64 @@ impl RegistryClient {
     }
 }
 
+/// 从 npmjs.org 批量下载 tarball 到目录。
+///
+/// 磁盘文件名保留 scope 前缀（`@scope/name` → `@scope-name-x.y.z.tgz`），
+/// 与下载用的 registry URL 路径段（仅末段）规则不同，不能混用。
+pub async fn download_tarballs_to_dir<F>(
+    packages: &[(String, String)],
+    output_dir: &std::path::Path,
+    on_progress: F,
+) -> Result<usize, String>
+where
+    F: Fn(usize, usize, &str),
+{
+    use tokio::fs;
+
+    fs::create_dir_all(output_dir)
+        .await
+        .map_err(|e| format!("创建目录失败: {}", e))?;
+
+    let http = reqwest::Client::new();
+    let total = packages.len();
+    let mut completed = 0usize;
+
+    for (name, version) in packages {
+        let disk_name = if name.starts_with('@') {
+            name.replace('/', "-")
+        } else {
+            name.clone()
+        };
+        let file_path = output_dir.join(format!("{}-{}.tgz", disk_name, version));
+
+        on_progress(completed, total, &format!("{}@{}", name, version));
+
+        let url = tarball_url("https://registry.npmjs.org", name, version);
+
+        match http.get(&url).send().await {
+            Ok(resp) if resp.status().is_success() => {
+                let bytes = resp.bytes().await.map_err(|e| e.to_string())?;
+                fs::write(&file_path, &bytes)
+                    .await
+                    .map_err(|e| format!("写入文件失败: {}", e))?;
+                completed += 1;
+            }
+            Ok(resp) => {
+                return Err(format!(
+                    "下载 {}@{} 失败 (HTTP {})",
+                    name, version, resp.status()
+                ));
+            }
+            Err(e) => {
+                return Err(format!("下载 {}@{} 失败: {}", name, version, e));
+            }
+        }
+    }
+
+    on_progress(completed, total, "");
+    Ok(completed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -572,6 +634,26 @@ mod tests {
 
     fn s(v: &str) -> String {
         v.to_string()
+    }
+
+    #[test]
+    fn tarball_url_handles_scoped_and_plain_packages() {
+        assert_eq!(
+            tarball_url("https://r.npmjs.org", "react", "18.0.0"),
+            "https://r.npmjs.org/react/-/react-18.0.0.tgz"
+        );
+        assert_eq!(
+            tarball_url("https://r.npmjs.org", "@babel/core", "7.1.0"),
+            "https://r.npmjs.org/@babel/core/-/core-7.1.0.tgz"
+        );
+    }
+
+    #[test]
+    fn tarball_url_trims_trailing_slash() {
+        assert_eq!(
+            tarball_url("http://localhost:4873/", "lodash", "4.17.21"),
+            "http://localhost:4873/lodash/-/lodash-4.17.21.tgz"
+        );
     }
 
     #[test]

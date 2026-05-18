@@ -287,26 +287,8 @@ async fn resolve_package_versions(
             let name = pkg.package_name.clone();
             let raw_range = pkg.version.clone();
 
-            let resolved = if let Some(v) = parser::pinned_version(&raw_range) {
-                Some(v)
-            } else {
-                let versions = {
-                    let map = cache.lock().await;
-                    map.get(&name).cloned()
-                };
-                let versions = match versions {
-                    Some(v) => Some(v),
-                    None => match parser::fetch_versions(&http, &sem, &name).await {
-                        Ok(v) => {
-                            let arc = Arc::new(v);
-                            cache.lock().await.insert(name.clone(), arc.clone());
-                            Some(arc)
-                        }
-                        Err(_) => None,
-                    },
-                };
-                versions.and_then(|vs| parser::resolve_max_satisfying(&raw_range, &vs))
-            };
+            let resolved =
+                parser::resolve_single(&http, &sem, &cache, &name, &raw_range).await;
 
             let cached = if let Some(ref v) = resolved {
                 let db_lock = db.lock().await;
@@ -460,72 +442,28 @@ async fn download_tarballs(
     output_dir: String,
 ) -> Result<usize, String> {
     use tauri::Emitter;
-    use tokio::fs;
 
-    let dir = PathBuf::from(&output_dir);
-    fs::create_dir_all(&dir)
-        .await
-        .map_err(|e| format!("创建目录失败: {}", e))?;
+    let pkgs: Vec<(String, String)> = packages
+        .into_iter()
+        .map(|p| (p.package_name, p.version))
+        .collect();
+    let app = app_handle.clone();
 
-    let http = reqwest::Client::new();
-    let total = packages.len();
-    let mut completed = 0usize;
-
-    for pkg in &packages {
-        let name_part = if pkg.package_name.starts_with('@') {
-            pkg.package_name.replace('/', "-")
-        } else {
-            pkg.package_name.clone()
-        };
-        let filename = format!("{}-{}.tgz", name_part, pkg.version);
-        let file_path = dir.join(&filename);
-
-        let _ = app_handle.emit(
-            "download-tarball-progress",
-            DownloadProgressEvent {
-                completed,
-                total,
-                current: format!("{}@{}", pkg.package_name, pkg.version),
-            },
-        );
-
-        let tarball_url = format!(
-            "https://registry.npmjs.org/{}/-/{}-{}.tgz",
-            pkg.package_name,
-            pkg.package_name.split('/').last().unwrap_or(&pkg.package_name),
-            pkg.version
-        );
-
-        match http.get(&tarball_url).send().await {
-            Ok(resp) if resp.status().is_success() => {
-                let bytes = resp.bytes().await.map_err(|e| e.to_string())?;
-                fs::write(&file_path, &bytes)
-                    .await
-                    .map_err(|e| format!("写入文件失败: {}", e))?;
-                completed += 1;
-            }
-            Ok(resp) => {
-                return Err(format!(
-                    "下载 {}@{} 失败 (HTTP {})",
-                    pkg.package_name, pkg.version, resp.status()
-                ));
-            }
-            Err(e) => {
-                return Err(format!("下载 {}@{} 失败: {}", pkg.package_name, pkg.version, e));
-            }
-        }
-    }
-
-    let _ = app_handle.emit(
-        "download-tarball-progress",
-        DownloadProgressEvent {
-            completed,
-            total,
-            current: String::new(),
+    registry_client::download_tarballs_to_dir(
+        &pkgs,
+        &PathBuf::from(&output_dir),
+        move |completed, total, current| {
+            let _ = app.emit(
+                "download-tarball-progress",
+                DownloadProgressEvent {
+                    completed,
+                    total,
+                    current: current.to_string(),
+                },
+            );
         },
-    );
-
-    Ok(completed)
+    )
+    .await
 }
 
 #[tauri::command]
