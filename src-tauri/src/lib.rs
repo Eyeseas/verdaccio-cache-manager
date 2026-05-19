@@ -344,7 +344,7 @@ async fn resolve_dependencies(packages: Vec<CacheRequest>) -> Result<Vec<Resolve
         .into_iter()
         .map(|p| (p.package_name, p.version))
         .collect();
-    dependency_resolver::resolve_all(initial).await
+    dependency_resolver::resolve_all(initial, "https://registry.npmjs.org").await
 }
 
 #[derive(serde::Serialize, Clone)]

@@ -15,19 +15,53 @@ pub fn parse_package_json(content: &str) -> Result<Vec<ParsedDependency>, String
     let json: serde_json::Value =
         serde_json::from_str(content).map_err(|e| format!("JSON 解析失败: {}", e))?;
 
-    let mut deps = Vec::new();
+    // 按名去重为单行。dependencies / devDependencies 之间「首次保留」
+    // （dependencies 先遍历 → prod range 胜出，不静默丢弃 prod）；
+    // 仅 optionalDependencies 按 npm 语义覆盖同名项。
+    let mut deps: Vec<ParsedDependency> = Vec::new();
+    let mut idx: HashMap<String, usize> = HashMap::new();
 
     for field in ["dependencies", "devDependencies"] {
         if let Some(obj) = json[field].as_object() {
             for (name, version) in obj {
+                if idx.contains_key(name) {
+                    continue;
+                }
                 if let Some(v) = version.as_str() {
                     if let Some(clean) = clean_semver_range(v) {
+                        idx.insert(name.clone(), deps.len());
                         deps.push(ParsedDependency {
                             name: name.clone(),
                             version: clean,
                             tarball_url: None,
                         });
                     }
+                }
+            }
+        }
+    }
+
+    if let Some(obj) = json["optionalDependencies"].as_object() {
+        for (name, version) in obj {
+            let existing_index = idx.remove(name);
+            if let Some(i) = existing_index {
+                deps.remove(i);
+                for index in idx.values_mut() {
+                    if *index > i {
+                        *index -= 1;
+                    }
+                }
+            }
+
+            if let Some(v) = version.as_str() {
+                if let Some(clean) = clean_semver_range(v) {
+                    let entry = ParsedDependency {
+                        name: name.clone(),
+                        version: clean,
+                        tarball_url: None,
+                    };
+                    idx.insert(name.clone(), deps.len());
+                    deps.push(entry);
                 }
             }
         }
@@ -44,7 +78,15 @@ fn clean_semver_range(raw: &str) -> Option<String> {
     // Reject non-semver specifiers (git/file/url/workspace/link/npm alias)
     let lower = trimmed.to_ascii_lowercase();
     for proto in [
-        "git+", "git:", "git@", "http://", "https://", "file:", "link:", "workspace:", "npm:",
+        "git+",
+        "git:",
+        "git@",
+        "http://",
+        "https://",
+        "file:",
+        "link:",
+        "workspace:",
+        "npm:",
     ] {
         if lower.starts_with(proto) {
             return None;
@@ -168,10 +210,7 @@ fn parse_v5_key(key: &str) -> Option<(String, String)> {
         if let Some(slash_pos) = key.rfind('/') {
             let name = &key[..slash_pos];
             let version = &key[slash_pos + 1..];
-            if !name.is_empty()
-                && !version.is_empty()
-                && version.chars().next()?.is_ascii_digit()
-            {
+            if !name.is_empty() && !version.is_empty() && version.chars().next()?.is_ascii_digit() {
                 return Some((name.to_string(), version.to_string()));
             }
         }
@@ -216,13 +255,9 @@ fn extract_package_name_from_path(path: &str) -> String {
 }
 
 pub fn detect_and_parse(file_path: &Path) -> Result<Vec<ParsedDependency>, String> {
-    let content =
-        std::fs::read_to_string(file_path).map_err(|e| format!("读取文件失败: {}", e))?;
+    let content = std::fs::read_to_string(file_path).map_err(|e| format!("读取文件失败: {}", e))?;
 
-    let filename = file_path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("");
+    let filename = file_path.file_name().and_then(|n| n.to_str()).unwrap_or("");
 
     match filename {
         "package.json" => parse_package_json(&content),
@@ -328,4 +363,54 @@ pub fn resolve_max_satisfying(range_str: &str, available: &[String]) -> Option<S
         .collect();
     matching.sort();
     matching.last().map(|v| v.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_package_json_dedups_optional_overriding_dependencies() {
+        let content = r#"{
+            "dependencies": { "shared": "^2.0.0", "only-dep": "1.0.0" },
+            "optionalDependencies": { "shared": "^1.0.0" }
+        }"#;
+        let deps = parse_package_json(content).unwrap();
+        // shared 仅一行，且采用 optionalDependencies 的范围
+        let shared: Vec<_> = deps.iter().filter(|d| d.name == "shared").collect();
+        assert_eq!(shared.len(), 1, "同名应去重为单行");
+        assert_eq!(shared[0].version, "^1.0.0", "optional 应覆盖 dependencies");
+        assert!(deps.iter().any(|d| d.name == "only-dep"));
+    }
+
+    #[test]
+    fn parse_package_json_keeps_prod_range_over_dev() {
+        // 同名同时在 dependencies / devDependencies：保留 prod range，单行
+        let content = r#"{
+            "dependencies": { "dup": "^2.0.0" },
+            "devDependencies": { "dup": "^3.0.0" }
+        }"#;
+        let deps = parse_package_json(content).unwrap();
+        let dup: Vec<_> = deps.iter().filter(|d| d.name == "dup").collect();
+        assert_eq!(dup.len(), 1, "同名应去重为单行");
+        assert_eq!(
+            dup[0].version, "^2.0.0",
+            "dependencies 应优先于 devDependencies"
+        );
+    }
+
+    #[test]
+    fn parse_package_json_invalid_optional_still_overrides_dependency() {
+        let content = r#"{
+            "dependencies": { "dup": "^2.0.0", "keep": "1.0.0" },
+            "optionalDependencies": { "dup": "file:../dup" }
+        }"#;
+        let deps = parse_package_json(content).unwrap();
+
+        assert!(
+            deps.iter().all(|d| d.name != "dup"),
+            "optionalDependencies 同名项即使不可解析，也应覆盖并移除 dependencies 旧条目"
+        );
+        assert!(deps.iter().any(|d| d.name == "keep"));
+    }
 }
