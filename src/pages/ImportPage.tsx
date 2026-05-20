@@ -17,10 +17,7 @@ import {
 import { ExportDropdown } from "@/components/ExportDropdown";
 import { RowContextMenu, type ContextMenuPosition } from "@/components/RowContextMenu";
 import { toast } from "sonner";
-import {
-  type DownloadSummary,
-  toastDownloadSummary,
-} from "@/lib/downloadSummary";
+import { downloadWithProgress } from "@/lib/downloadSummary";
 import {
   applyResolveProgress,
   applyResolvedPackagesForCurrentRequest,
@@ -427,11 +424,7 @@ export function ImportPage() {
 
       const dir = await open({ directory: true, multiple: false });
       if (!dir) return;
-      const summary = await invoke<DownloadSummary>("download_tarballs", {
-        packages: [{ package_name: dep.name, version }],
-        outputDir: dir,
-      });
-      toastDownloadSummary(summary);
+      await downloadWithProgress([{ package_name: dep.name, version }], dir);
     } catch (e) {
       toast.error("导出失败", { description: String(e) });
     } finally {
@@ -463,8 +456,7 @@ export function ImportPage() {
 
       const dir = await open({ directory: true, multiple: false });
       if (!dir) return;
-      const summary = await invoke<DownloadSummary>("download_tarballs", { packages, outputDir: dir });
-      toastDownloadSummary(summary);
+      await downloadWithProgress(packages, dir);
     } catch (e) {
       toast.error("导出失败", { description: String(e) });
     } finally {

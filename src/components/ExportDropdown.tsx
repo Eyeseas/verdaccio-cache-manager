@@ -1,5 +1,4 @@
 import { useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useTaskStore } from "@/stores/taskStore";
 import {
@@ -10,10 +9,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Download, ChevronUp, Loader2, Box, Boxes } from "lucide-react";
 import { toast } from "sonner";
-import {
-  type DownloadSummary,
-  toastDownloadSummary,
-} from "@/lib/downloadSummary";
+import { downloadWithProgress } from "@/lib/downloadSummary";
 
 interface ExportDropdownProps {
   getSelectedPackages: () =>
@@ -44,16 +40,7 @@ export function ExportDropdown({
   const doExport = async (packages: { package_name: string; version: string }[]) => {
     const dir = await selectOutputDir();
     if (!dir) return;
-
-    try {
-      const summary = await invoke<DownloadSummary>("download_tarballs", {
-        packages,
-        outputDir: dir,
-      });
-      toastDownloadSummary(summary);
-    } catch (e) {
-      toast.error("导出失败", { description: String(e) });
-    }
+    await downloadWithProgress(packages, dir);
   };
 
   const collectPackages = async () => {

@@ -1,4 +1,6 @@
 import { toast } from "sonner";
+import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 
 export interface DownloadFailure {
   package: string;
@@ -40,4 +42,42 @@ export function toastDownloadSummary(summary: DownloadSummary) {
   toast.warning("导出部分完成", {
     description: `成功 ${summary.success} 个，失败 ${summary.failed} 个：${formatFailures(summary.failures)}`,
   });
+}
+
+interface DownloadProgressEvent {
+  completed: number;
+  total: number;
+  current: string;
+}
+
+export async function downloadWithProgress(
+  packages: { package_name: string; version: string }[],
+  outputDir: string,
+): Promise<DownloadSummary> {
+  const toastId = toast.loading("准备下载...", { duration: Infinity });
+  const unlisten = await listen<DownloadProgressEvent>(
+    "download-tarball-progress",
+    (event) => {
+      const { completed, total, current } = event.payload;
+      toast.loading(`下载中 ${completed}/${total}`, {
+        id: toastId,
+        description: current,
+      });
+    },
+  );
+  try {
+    const summary = await invoke<DownloadSummary>("download_tarballs", {
+      packages,
+      outputDir,
+    });
+    toast.dismiss(toastId);
+    toastDownloadSummary(summary);
+    return summary;
+  } catch (e) {
+    toast.dismiss(toastId);
+    toast.error("导出失败", { description: String(e) });
+    throw e;
+  } finally {
+    unlisten();
+  }
 }
