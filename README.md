@@ -69,6 +69,16 @@
 
 ## 近期更新
 
+**v0.1.27**
+- 修复本地上传包后安装时 EINTEGRITY 校验失败及依赖丢失问题
+- 离线场景下 Verdaccio 仅有 uplink metadata 而无本地 tarball 时，自动 unpublish 后重新 publish
+
+**v0.1.26**
+- 依赖解析支持 optionalDependencies 与失败容错
+- 搜索页包名增加一键复制按钮
+- 导出 tarball 时在 sonner toast 中显示实时下载进度
+- 导出 tarball 单包失败不再中止整批，结束后始终弹出汇总提醒
+
 **v0.1.12 / v0.1.11**
 - 全新应用图标：macOS squircle 风格，深森林绿配等距 3D 包裹盒，呼应 Verdaccio 品牌
 
