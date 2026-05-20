@@ -1,5 +1,18 @@
 # Changelog
 
+## v0.1.26 (2026-05-20)
+
+### Features
+- 依赖解析支持 optionalDependencies 与失败容错 (37800b9)
+- 搜索页包名增加一键复制按钮 (90170a3)
+- 导出 tarball 时在 sonner toast 中显示实时下载进度 (e625acc)
+
+### Bug Fixes
+- 导出 tarball 单包失败不再中止整批，结束后始终弹出汇总提醒 (b99a8a8)
+
+### Refactor
+- extract resolve_single and tarball helpers, deduplicate logic (b5f81a8)
+
 ## v0.1.25 (2026-05-17)
 
 ### Features
