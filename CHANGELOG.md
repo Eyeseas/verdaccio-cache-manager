@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.1.27 (2026-05-20)
+
+### Bug Fixes
+- publish 时携带完整 metadata（dependencies 等）并计算 shasum/integrity，修复安装时 EINTEGRITY 及依赖丢失 (440f77d)
+- 本地来源遇到 409 时自动 unpublish 后重新 publish，解决 Verdaccio 有 uplink metadata 但无本地 tarball 的离线场景 (440f77d)
+
 ## v0.1.26 (2026-05-20)
 
 ### Features
