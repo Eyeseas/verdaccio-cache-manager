@@ -440,7 +440,7 @@ async fn download_tarballs(
     app_handle: tauri::AppHandle,
     packages: Vec<CacheRequest>,
     output_dir: String,
-) -> Result<usize, String> {
+) -> Result<registry_client::DownloadSummary, String> {
     use tauri::Emitter;
 
     let pkgs: Vec<(String, String)> = packages

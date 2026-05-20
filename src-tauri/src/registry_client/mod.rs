@@ -567,15 +567,33 @@ impl RegistryClient {
     }
 }
 
+/// tarball 批量下载汇总。单个包失败不中止整批，失败项收集进 `failures`。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DownloadSummary {
+    pub success: usize,
+    pub failed: usize,
+    pub failures: Vec<DownloadFailure>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DownloadFailure {
+    /// `name@version`
+    pub package: String,
+    pub reason: String,
+}
+
 /// 从 npmjs.org 批量下载 tarball 到目录。
 ///
 /// 磁盘文件名保留 scope 前缀（`@scope/name` → `@scope-name-x.y.z.tgz`），
 /// 与下载用的 registry URL 路径段（仅末段）规则不同，不能混用。
+///
+/// 单个包下载/写入失败不会中止整批：失败项收集进 [`DownloadSummary::failures`]，
+/// 其余包继续下载。仅当创建目录或构造 HTTP client 等前置步骤失败时返回 `Err`。
 pub async fn download_tarballs_to_dir<F>(
     packages: &[(String, String)],
     output_dir: &std::path::Path,
     on_progress: F,
-) -> Result<usize, String>
+) -> Result<DownloadSummary, String>
 where
     F: Fn(usize, usize, &str),
 {
@@ -585,9 +603,15 @@ where
         .await
         .map_err(|e| format!("创建目录失败: {}", e))?;
 
-    let http = reqwest::Client::new();
+    let http = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(15))
+        .timeout(std::time::Duration::from_secs(120))
+        .build()
+        .map_err(|e| format!("初始化下载客户端失败: {}", e))?;
+
     let total = packages.len();
-    let mut completed = 0usize;
+    let mut success = 0usize;
+    let mut failures: Vec<DownloadFailure> = Vec::new();
 
     for (name, version) in packages {
         let disk_name = if name.starts_with('@') {
@@ -597,32 +621,39 @@ where
         };
         let file_path = output_dir.join(format!("{}-{}.tgz", disk_name, version));
 
-        on_progress(completed, total, &format!("{}@{}", name, version));
+        on_progress(success, total, &format!("{}@{}", name, version));
 
         let url = tarball_url("https://registry.npmjs.org", name, version);
 
-        match http.get(&url).send().await {
-            Ok(resp) if resp.status().is_success() => {
-                let bytes = resp.bytes().await.map_err(|e| e.to_string())?;
-                fs::write(&file_path, &bytes)
-                    .await
-                    .map_err(|e| format!("写入文件失败: {}", e))?;
-                completed += 1;
-            }
-            Ok(resp) => {
-                return Err(format!(
-                    "下载 {}@{} 失败 (HTTP {})",
-                    name, version, resp.status()
-                ));
-            }
-            Err(e) => {
-                return Err(format!("下载 {}@{} 失败: {}", name, version, e));
-            }
+        let reason = match http.get(&url).send().await {
+            Ok(resp) if resp.status().is_success() => match resp.bytes().await {
+                Ok(bytes) => match fs::write(&file_path, &bytes).await {
+                    Ok(()) => {
+                        success += 1;
+                        None
+                    }
+                    Err(e) => Some(format!("写入文件失败: {}", e)),
+                },
+                Err(e) => Some(format!("读取响应失败: {}", e)),
+            },
+            Ok(resp) => Some(format!("HTTP {}", resp.status())),
+            Err(e) => Some(e.to_string()),
+        };
+
+        if let Some(reason) = reason {
+            failures.push(DownloadFailure {
+                package: format!("{}@{}", name, version),
+                reason,
+            });
         }
     }
 
-    on_progress(completed, total, "");
-    Ok(completed)
+    on_progress(success, total, "");
+    Ok(DownloadSummary {
+        success,
+        failed: failures.len(),
+        failures,
+    })
 }
 
 #[cfg(test)]

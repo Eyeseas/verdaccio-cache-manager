@@ -10,6 +10,10 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Download, ChevronUp, Loader2, Box, Boxes } from "lucide-react";
 import { toast } from "sonner";
+import {
+  type DownloadSummary,
+  toastDownloadSummary,
+} from "@/lib/downloadSummary";
 
 interface ExportDropdownProps {
   getSelectedPackages: () =>
@@ -42,13 +46,11 @@ export function ExportDropdown({
     if (!dir) return;
 
     try {
-      const count = await invoke<number>("download_tarballs", {
+      const summary = await invoke<DownloadSummary>("download_tarballs", {
         packages,
         outputDir: dir,
       });
-      toast.success(`导出完成`, {
-        description: `已下载 ${count} 个 tarball 到目标目录`,
-      });
+      toastDownloadSummary(summary);
     } catch (e) {
       toast.error("导出失败", { description: String(e) });
     }
