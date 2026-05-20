@@ -1,4 +1,6 @@
+use base64::Engine as _;
 use serde::{Deserialize, Serialize};
+use sha1::Digest as _;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -312,12 +314,36 @@ async fn execute_publish(
 
     update_task_status(&tasks, &task.id, TaskStatus::Uploading, None, &app).await;
 
-    let metadata = serde_json::json!({
-        "name": task.package_name,
-        "version": task.version,
-        "dist": {
-            "tarball": crate::registry_client::tarball_url(&target_client.registry_url, &task.package_name, &task.version)
+    let shasum = sha1::Sha1::digest(&tarball_data)
+        .iter()
+        .map(|b| format!("{:02x}", b))
+        .collect::<String>();
+    let integrity = format!(
+        "sha512-{}",
+        base64::engine::general_purpose::STANDARD.encode(sha2::Sha512::digest(&tarball_data))
+    );
+
+    // Extract full package.json from tarball to preserve dependencies metadata
+    let mut metadata = match extract_package_json_from_tarball(&tarball_data) {
+        Ok(mut pkg) => {
+            if let Some(obj) = pkg.as_object_mut() {
+                obj.insert("name".to_string(), serde_json::json!(task.package_name));
+                obj.insert("version".to_string(), serde_json::json!(task.version));
+            }
+            pkg
         }
+        Err(_) => {
+            serde_json::json!({
+                "name": task.package_name,
+                "version": task.version,
+            })
+        }
+    };
+
+    metadata["dist"] = serde_json::json!({
+        "tarball": crate::registry_client::tarball_url(&target_client.registry_url, &task.package_name, &task.version),
+        "shasum": shasum,
+        "integrity": integrity
     });
 
     for attempt in 0..=retry_count {
@@ -338,8 +364,58 @@ async fn execute_publish(
             }
             Ok(Err(e)) => {
                 if e.contains("409") || e.contains("conflict") || e.contains("already exist") {
-                    update_task_status(&tasks, &task.id, TaskStatus::Skipped, Some("版本已存在".to_string()), &app).await;
-                    return;
+                    let is_local = tarball_url.starts_with("file://") || tarball_url.starts_with("dir://");
+                    if !is_local {
+                        // Remote source: trust that the version genuinely exists
+                        update_task_status(&tasks, &task.id, TaskStatus::Skipped, Some("版本已存在".to_string()), &app).await;
+                        return;
+                    }
+
+                    // Local source (dir:// or file://): Verdaccio may only have metadata
+                    // from uplink without a local tarball. Unpublish then re-publish to
+                    // ensure the tarball is physically stored.
+                    let _ = target_client
+                        .unpublish_package(&task.package_name, Some(&task.version))
+                        .await;
+
+                    match tokio::time::timeout(
+                        Duration::from_secs(timeout_secs),
+                        target_client.publish_package(
+                            &task.package_name,
+                            &task.version,
+                            metadata.clone(),
+                            &tarball_data,
+                        ),
+                    )
+                    .await
+                    {
+                        Ok(Ok(())) => {
+                            update_task_status(&tasks, &task.id, TaskStatus::Success, None, &app).await;
+                            return;
+                        }
+                        Ok(Err(e2)) => {
+                            update_task_status(
+                                &tasks,
+                                &task.id,
+                                TaskStatus::Failed,
+                                Some(format!("unpublish 后重试仍失败: {}", e2)),
+                                &app,
+                            )
+                            .await;
+                            return;
+                        }
+                        Err(_) => {
+                            update_task_status(
+                                &tasks,
+                                &task.id,
+                                TaskStatus::Failed,
+                                Some("unpublish 后重试上传超时".to_string()),
+                                &app,
+                            )
+                            .await;
+                            return;
+                        }
+                    }
                 }
                 if attempt == retry_count {
                     update_task_status(
@@ -368,6 +444,33 @@ async fn execute_publish(
             }
         }
     }
+}
+
+fn extract_package_json_from_tarball(tarball_data: &[u8]) -> Result<serde_json::Value, String> {
+    use flate2::read::GzDecoder;
+    use std::io::Read;
+    use tar::Archive;
+
+    let gz = GzDecoder::new(tarball_data);
+    let mut archive = Archive::new(gz);
+
+    for entry in archive.entries().map_err(|e| e.to_string())? {
+        let mut entry = entry.map_err(|e| e.to_string())?;
+        let path = entry.path().map_err(|e| e.to_string())?.to_path_buf();
+
+        // npm tarballs store package.json at "package/package.json"
+        if path.ends_with("package.json")
+            && path.components().count() == 2
+        {
+            let mut content = String::new();
+            entry.read_to_string(&mut content).map_err(|e| e.to_string())?;
+            let json: serde_json::Value =
+                serde_json::from_str(&content).map_err(|e| e.to_string())?;
+            return Ok(json);
+        }
+    }
+
+    Err("tarball 中未找到 package.json".to_string())
 }
 
 async fn update_task_status(
