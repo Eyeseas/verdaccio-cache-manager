@@ -2,6 +2,7 @@ pub mod cache_db;
 pub mod config;
 pub mod dependency_resolver;
 pub mod local_scanner;
+pub mod package_downgrade;
 pub mod parser;
 pub mod registry_client;
 pub mod storage_scanner;
