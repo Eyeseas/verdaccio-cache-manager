@@ -109,7 +109,7 @@ function ScanTab() {
       unlistenRef.current?.();
       unlistenRef.current = null;
       setUploading(false);
-      void loadCachedPackages();
+      void loadCachedPackages({ force: true });
     }
   }, [packages, uploading, loadCachedPackages]);
 
@@ -145,7 +145,7 @@ function ScanTab() {
     try {
       const [scanned] = await Promise.all([
         invoke<LocalPackage[]>("scan_node_modules", { dirPath: dir }),
-        loadCachedPackages(),
+        loadCachedPackages({ force: true }),
       ]);
 
       if (scanned.length === 0) {

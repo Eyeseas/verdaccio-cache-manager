@@ -51,4 +51,46 @@ describe("cacheStore.loadCachedPackages", () => {
     expect(s.cachedSource).toBe("none");
     expect(s.loading).toBe(false);
   });
+
+  it("skips re-fetch within TTL and preserves lastLoadedAt", async () => {
+    invoke.mockResolvedValueOnce([
+      {
+        name: "left-pad",
+        description: null,
+        latest_version: "1.0.0",
+        versions: ["1.0.0"],
+        cached_versions: ["1.0.0"],
+      },
+    ]);
+
+    await useCacheStore.getState().loadCachedPackages();
+    const firstLoadedAt = useCacheStore.getState().lastLoadedAt;
+    expect(firstLoadedAt).not.toBeNull();
+
+    await useCacheStore.getState().loadCachedPackages();
+
+    expect(invoke).toHaveBeenCalledTimes(1);
+    expect(useCacheStore.getState().lastLoadedAt).toBe(firstLoadedAt);
+  });
+
+  it("re-fetches when force=true even within TTL", async () => {
+    invoke.mockResolvedValue([
+      {
+        name: "left-pad",
+        description: null,
+        latest_version: "1.0.0",
+        versions: ["1.0.0"],
+        cached_versions: ["1.0.0"],
+      },
+    ]);
+
+    await useCacheStore.getState().loadCachedPackages();
+    const firstLoadedAt = useCacheStore.getState().lastLoadedAt!;
+
+    await new Promise((r) => setTimeout(r, 5));
+    await useCacheStore.getState().loadCachedPackages({ force: true });
+
+    expect(invoke).toHaveBeenCalledTimes(2);
+    expect(useCacheStore.getState().lastLoadedAt).toBeGreaterThan(firstLoadedAt);
+  });
 });

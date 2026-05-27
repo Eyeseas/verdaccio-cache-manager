@@ -17,17 +17,31 @@ interface CacheStore {
   cachedError: string | null;
   loading: boolean;
   lastLoadedAt: number | null;
-  loadCachedPackages: () => Promise<void>;
+  loadCachedPackages: (options?: { force?: boolean }) => Promise<void>;
 }
 
-export const useCacheStore = create<CacheStore>((set) => ({
+const CACHE_TTL_MS = 30_000;
+
+export const useCacheStore = create<CacheStore>((set, get) => ({
   cachedAll: [],
   cachedSource: "none",
   cachedError: null,
   loading: false,
   lastLoadedAt: null,
 
-  loadCachedPackages: async () => {
+  loadCachedPackages: async (options) => {
+    const force = options?.force === true;
+    if (!force) {
+      const { lastLoadedAt, loading, cachedSource } = get();
+      if (loading) return;
+      if (
+        cachedSource === "db" &&
+        lastLoadedAt !== null &&
+        Date.now() - lastLoadedAt < CACHE_TTL_MS
+      ) {
+        return;
+      }
+    }
     set({ loading: true, cachedError: null });
     try {
       const packages = await invoke<CachedPackage[]>("get_all_cached_packages");

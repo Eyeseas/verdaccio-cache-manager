@@ -390,7 +390,7 @@ export function SearchPage() {
         affected.forEach((n) => delete next[n]);
         return next;
       });
-      await loadCachedFromStore();
+      await loadCachedFromStore({ force: true });
     }
     if (failures.length > 0) {
       toast.error(`${failures.length} 项失败`, {
@@ -421,7 +421,7 @@ export function SearchPage() {
     if (ok > 0) {
       toast.success(`已 deprecate ${ok} 个版本`);
       setSelected(new Map());
-      await loadCachedFromStore();
+      await loadCachedFromStore({ force: true });
     }
     if (failures.length > 0) {
       toast.error(`${failures.length} 项失败`, {

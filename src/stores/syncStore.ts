@@ -51,7 +51,7 @@ export const useSyncStore = create<SyncStore>((set) => ({
     try {
       await invoke("clear_cache_index");
       set({ lastSyncAt: null });
-      useCacheStore.getState().loadCachedPackages();
+      useCacheStore.getState().loadCachedPackages({ force: true });
       toast.success("缓存索引已清除");
     } catch (e) {
       toast.error("清除失败", { description: String(e) });
@@ -105,7 +105,7 @@ export const useSyncStore = create<SyncStore>((set) => ({
             description: undefined,
             duration: 3000,
           });
-          useCacheStore.getState().loadCachedPackages();
+          useCacheStore.getState().loadCachedPackages({ force: true });
           break;
         case "error":
           set({ status: "error", error: message });
