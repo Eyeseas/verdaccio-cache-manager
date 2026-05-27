@@ -1,10 +1,11 @@
 import { NavLink } from "react-router-dom";
-import { Search, FileInput, Upload, Settings, RefreshCw } from "lucide-react";
+import { Search, FileInput, Upload, Settings, RefreshCw, FileDown } from "lucide-react";
 import { useSyncStore } from "@/stores/syncStore";
 
 const navItems = [
   { to: "/", icon: Search, label: "搜索" },
   { to: "/import", icon: FileInput, label: "导入" },
+  { to: "/downgrade", icon: FileDown, label: "降级" },
   { to: "/upload", icon: Upload, label: "上传" },
   { to: "/settings", icon: Settings, label: "设置" },
 ];
