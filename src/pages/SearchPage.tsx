@@ -12,6 +12,7 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 import { useConfigStore } from "@/stores/configStore";
 import { useTaskStore } from "@/stores/taskStore";
 import { useCacheStore, type CachedPackage } from "@/stores/cacheStore";
+import { useSyncStore } from "@/stores/syncStore";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -65,14 +66,6 @@ function isStableVersion(v: string): boolean {
   return /^\d+\.\d+\.\d+$/.test(v);
 }
 
-function formatRelativeTime(ts: number): string {
-  const diffSec = Math.floor((Date.now() - ts) / 1000);
-  if (diffSec < 60) return `${diffSec} 秒前`;
-  if (diffSec < 3600) return `${Math.floor(diffSec / 60)} 分钟前`;
-  if (diffSec < 86400) return `${Math.floor(diffSec / 3600)} 小时前`;
-  return new Date(ts).toLocaleString();
-}
-
 interface CopyButtonProps {
   text: string;
   title: string;
@@ -121,10 +114,11 @@ export function SearchPage() {
   const {
     cachedAll,
     cachedError,
+    cachedSource,
     loading: cacheLoading,
-    lastLoadedAt,
     loadCachedPackages: loadCachedFromStore,
   } = useCacheStore();
+  const lastSyncAt = useSyncStore((s) => s.lastSyncAt);
   const [query, setQuery] = useState("");
   const [source, setSource] = useState<RegistrySource>("npmjs");
   const [results, setResults] = useState<SearchResult[]>([]);
@@ -488,11 +482,12 @@ export function SearchPage() {
             <span>仅显示正式版本</span>
           </label>
 
-          {lastLoadedAt && (
+          {cachedAll.length > 0 && (
             <span className="text-xs text-muted-foreground">
-              已缓存来源：本地索引
-              · {cachedAll.length} 个包 · 更新于{" "}
-              {formatRelativeTime(lastLoadedAt)}
+              已缓存来源：本地索引 · {cachedAll.length} 个包
+              {lastSyncAt
+                ? ` · 上次同步: ${new Date(lastSyncAt).toLocaleString()}`
+                : ""}
             </span>
           )}
         </div>
@@ -695,7 +690,7 @@ export function SearchPage() {
           !cacheLoading && (
             <div className="py-8 text-center text-muted-foreground">
               {source === "verdaccio" ? (
-                lastLoadedAt === null ? (
+                cachedSource === "none" ? (
                   <p className="text-sm">索引为空，请在设置中配置源地址并同步</p>
                 ) : cachedError ? (
                   <p className="text-sm">{cachedError}</p>
