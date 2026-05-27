@@ -6,5 +6,6 @@ target/
 .ace-tool/
 .serena/
 .superpowers
+.worktrees/
 
 docs/superpowers/**
