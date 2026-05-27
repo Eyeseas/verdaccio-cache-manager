@@ -73,13 +73,20 @@ function formatRelativeTime(ts: number): string {
   return new Date(ts).toLocaleString();
 }
 
-function CopyNameButton({ name }: { name: string }) {
+interface CopyButtonProps {
+  text: string;
+  title: string;
+  className?: string;
+}
+
+function CopyButton({ text, title, className }: CopyButtonProps) {
   const [copied, setCopied] = useState(false);
 
   const handleCopy = async (e: MouseEvent) => {
     e.stopPropagation();
+    e.preventDefault();
     try {
-      await navigator.clipboard.writeText(name);
+      await navigator.clipboard.writeText(text);
       setCopied(true);
       setTimeout(() => setCopied(false), 1500);
     } catch {
@@ -90,9 +97,12 @@ function CopyNameButton({ name }: { name: string }) {
   return (
     <button
       type="button"
-      title="复制包名"
+      title={title}
       onClick={handleCopy}
-      className="shrink-0 rounded p-1 text-muted-foreground opacity-0 transition-opacity hover:bg-muted hover:text-foreground group-hover:opacity-100"
+      className={
+        className ??
+        "shrink-0 rounded p-1 text-muted-foreground opacity-0 transition-opacity hover:bg-muted hover:text-foreground group-hover:opacity-100"
+      }
     >
       {copied ? (
         <Check className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400" />
@@ -541,7 +551,7 @@ export function SearchPage() {
                       <div className="min-w-0 flex-1">
                         <div className="flex items-center gap-2">
                           <span className="font-medium">{pkg.name}</span>
-                          <CopyNameButton name={pkg.name} />
+                          <CopyButton text={pkg.name} title="复制包名" />
                           {pkg.latest_version && (
                             <Badge variant="secondary">
                               {pkg.latest_version}
@@ -589,15 +599,23 @@ export function SearchPage() {
                                   });
                                 };
 
+                                const copyChipBtnClass =
+                                  "-mr-1 ml-0.5 shrink-0 rounded p-0.5 text-current opacity-0 hover:bg-emerald-500/20 hover:opacity-100 group-hover/v:opacity-70";
+
                                 if (isCached && !isVerdaccio) {
                                   return (
                                     <span
                                       key={v}
                                       title="已缓存到 Verdaccio"
-                                      className="flex items-center gap-1.5 rounded-md border border-emerald-500/40 bg-emerald-500/10 px-2 py-1 text-sm text-emerald-700 dark:text-emerald-400"
+                                      className="group/v flex items-center gap-1.5 rounded-md border border-emerald-500/40 bg-emerald-500/10 px-2 py-1 text-sm text-emerald-700 dark:text-emerald-400"
                                     >
                                       <Check className="h-3.5 w-3.5" />
                                       <span>{v}</span>
+                                      <CopyButton
+                                        text={`${pkg.name}@${v}`}
+                                        title="复制 包名@版本号"
+                                        className={copyChipBtnClass}
+                                      />
                                     </span>
                                   );
                                 }
@@ -608,7 +626,7 @@ export function SearchPage() {
                                       key={v}
                                       title="已缓存到 Verdaccio · 右键可管理"
                                       onContextMenu={openVersionMenu}
-                                      className={`flex cursor-pointer items-center gap-1.5 rounded-md border px-2 py-1 text-sm transition-colors ${
+                                      className={`group/v flex cursor-pointer items-center gap-1.5 rounded-md border px-2 py-1 text-sm transition-colors ${
                                         isSelected
                                           ? "border-emerald-500 bg-emerald-500/20"
                                           : "border-emerald-500/40 bg-emerald-500/10 hover:bg-emerald-500/20"
@@ -623,6 +641,11 @@ export function SearchPage() {
                                       />
                                       <Check className="h-3.5 w-3.5" />
                                       <span>{v}</span>
+                                      <CopyButton
+                                        text={`${pkg.name}@${v}`}
+                                        title="复制 包名@版本号"
+                                        className={copyChipBtnClass}
+                                      />
                                     </label>
                                   );
                                 }
