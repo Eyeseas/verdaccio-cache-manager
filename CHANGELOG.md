@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.1.29 (2026-05-27)
+
+### Bug Fixes
+- 搜索页"更新于"显示改用 syncStore.lastSyncAt（后端持久化的真实同步时点），切换 npmjs/Verdaccio tab 不再把时间重置为 0 秒前 (624b015, 05fbdb2)
+
 ## v0.1.28 (2026-05-27)
 
 ### Features
