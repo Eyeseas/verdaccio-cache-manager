@@ -153,11 +153,31 @@ export function SearchPage() {
   const filteredCached = useMemo(() => {
     const q = query.trim().toLowerCase();
     if (!q) return cachedAll;
-    return cachedAll.filter(
-      (p) =>
-        p.name.toLowerCase().includes(q) ||
-        (p.description?.toLowerCase().includes(q) ?? false)
-    );
+
+    const scored: { pkg: SearchResult; score: number }[] = [];
+    for (const pkg of cachedAll) {
+      const name = pkg.name.toLowerCase();
+      const idx = name.indexOf(q);
+      if (idx < 0) continue;
+      const bare = name.startsWith("@") ? name.split("/")[1] ?? name : name;
+      let score: number;
+      if (name === q) score = 0;
+      else if (bare === q) score = 1;
+      else if (idx === 0) score = 2;
+      else if (bare.startsWith(q)) score = 3;
+      else score = 100 + idx;
+      scored.push({ pkg, score });
+    }
+
+    scored.sort((a, b) => {
+      if (a.score !== b.score) return a.score - b.score;
+      if (a.pkg.name.length !== b.pkg.name.length) {
+        return a.pkg.name.length - b.pkg.name.length;
+      }
+      return a.pkg.name.localeCompare(b.pkg.name);
+    });
+
+    return scored.map((s) => s.pkg);
   }, [cachedAll, query]);
 
   const displayResults = source === "verdaccio" ? filteredCached : results;
