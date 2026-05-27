@@ -278,7 +278,7 @@ fn analyze_dependency(
     };
 
     base.target_version = Some(target.to_string());
-    base.status = fallback_status(original_exact.as_ref(), &target, allow_major_downgrade);
+    base.status = fallback_status(spec, original_exact.as_ref(), &target);
     base.reason = reason_for_status(&base.status);
     base
 }
@@ -365,18 +365,10 @@ fn status_for_target(
 }
 
 fn fallback_status(
+    spec: &str,
     original_exact: Option<&Version>,
     target: &Version,
-    allow_major_downgrade: bool,
 ) -> DowngradeStatus {
-    if allow_major_downgrade
-        && original_exact
-            .map(|original| original.major != target.major)
-            .unwrap_or(true)
-    {
-        return DowngradeStatus::MajorDowngraded;
-    }
-
     if let Some(original) = original_exact {
         if original == target {
             DowngradeStatus::UnchangedCached
@@ -387,6 +379,8 @@ fn fallback_status(
         } else {
             DowngradeStatus::RewrittenCached
         }
+    } else if infer_major(spec).is_some_and(|major| major != target.major) {
+        DowngradeStatus::MajorDowngraded
     } else {
         DowngradeStatus::Downgraded
     }
@@ -472,6 +466,22 @@ mod tests {
 
         assert_eq!(analysis.items[0].status, DowngradeStatus::MajorDowngraded);
         assert_eq!(analysis.items[0].target_version.as_deref(), Some("17.9.0"));
+    }
+
+    #[test]
+    fn allow_major_keeps_same_major_status_when_same_major_cache_is_highest() {
+        let mut cached = HashMap::new();
+        cached.insert(
+            "react".to_string(),
+            vec!["17.9.0".to_string(), "18.3.0".to_string()],
+        );
+        let input = r#"{"dependencies":{"react":"^18.4.0"}}"#;
+
+        let analysis = analyze_content("package.json", input, &cached, true, None).unwrap();
+
+        assert_eq!(analysis.items[0].status, DowngradeStatus::Downgraded);
+        assert_eq!(analysis.items[0].target_version.as_deref(), Some("18.3.0"));
+        assert_eq!(analysis.summary.major_downgraded, 0);
     }
 
     #[test]
