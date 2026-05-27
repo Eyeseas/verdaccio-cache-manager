@@ -1,7 +1,9 @@
 use node_semver::{Range, Version};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+use crate::registry_client::SearchResult;
 
 const SUPPORTED_SECTIONS: [&str; 3] = [
     "dependencies",
@@ -56,6 +58,44 @@ pub struct DowngradeAnalysis {
     pub items: Vec<DowngradeItem>,
     pub summary: DowngradeSummary,
     pub cache_index_empty: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SavePathResult {
+    pub output_path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OverwriteResult {
+    pub file_path: String,
+    pub backup_path: String,
+}
+
+pub fn analyze_file(
+    file_path: &str,
+    cached_versions: &HashMap<String, Vec<String>>,
+    allow_major_downgrade: bool,
+    request_id: Option<String>,
+) -> Result<DowngradeAnalysis, String> {
+    if !is_supported_package_file(file_path) {
+        return Err("仅支持 package.json".to_string());
+    }
+    let content =
+        std::fs::read_to_string(file_path).map_err(|e| format!("读取 package.json 失败: {}", e))?;
+    let mut analysis = analyze_content(
+        file_path,
+        &content,
+        cached_versions,
+        allow_major_downgrade,
+        request_id,
+    )?;
+    analysis.file_path = file_path.to_string();
+    analysis.file_name = Path::new(file_path)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("package.json")
+        .to_string();
+    Ok(analysis)
 }
 
 pub fn analyze_content(
@@ -116,6 +156,50 @@ pub fn analyze_content(
         summary,
         cache_index_empty: cached_versions.is_empty(),
     })
+}
+
+pub fn cached_map_from_packages(packages: &[SearchResult]) -> HashMap<String, Vec<String>> {
+    packages
+        .iter()
+        .map(|pkg| (pkg.name.clone(), pkg.cached_versions.clone()))
+        .collect()
+}
+
+pub fn save_content_to_path(path: &Path, content: &str) -> Result<PathBuf, String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("创建输出目录失败: {}", e))?;
+    }
+    std::fs::write(path, content).map_err(|e| format!("写入文件失败: {}", e))?;
+    Ok(path.to_path_buf())
+}
+
+pub fn overwrite_with_backup(path: &Path, content: &str) -> Result<OverwriteResult, String> {
+    if !is_supported_package_file(path.to_string_lossy().as_ref()) {
+        return Err("仅支持覆盖 package.json".to_string());
+    }
+
+    let original =
+        std::fs::read(path).map_err(|e| format!("读取原 package.json 失败: {}", e))?;
+    let backup_path = backup_path_for(path);
+    std::fs::write(&backup_path, original).map_err(|e| format!("创建备份失败: {}", e))?;
+    std::fs::write(path, content).map_err(|e| format!("覆盖 package.json 失败: {}", e))?;
+
+    Ok(OverwriteResult {
+        file_path: path.to_string_lossy().to_string(),
+        backup_path: backup_path.to_string_lossy().to_string(),
+    })
+}
+
+fn backup_path_for(path: &Path) -> PathBuf {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let filename = format!("package.json.{}.bak", ts);
+    path.with_file_name(filename)
 }
 
 fn is_supported_package_file(file_name: &str) -> bool {
@@ -433,5 +517,53 @@ mod tests {
 
         assert_eq!(analysis.items[0].status, DowngradeStatus::MissingCache);
         assert!(analysis.updated_content.contains("\"fsevents\": \"^2.3.3\""));
+    }
+
+    #[test]
+    fn save_downgraded_content_writes_selected_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let output = dir.path().join("package.downgraded.json");
+
+        let written = save_content_to_path(&output, "{\"dependencies\":{}}\n").unwrap();
+
+        assert_eq!(written, output);
+        assert_eq!(
+            std::fs::read_to_string(output).unwrap(),
+            "{\"dependencies\":{}}\n"
+        );
+    }
+
+    #[test]
+    fn overwrite_package_json_creates_backup_before_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let package_json = dir.path().join("package.json");
+        std::fs::write(&package_json, "{\"dependencies\":{\"react\":\"18.4.0\"}}\n")
+            .unwrap();
+
+        let result =
+            overwrite_with_backup(&package_json, "{\"dependencies\":{\"react\":\"18.3.0\"}}\n")
+                .unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(&package_json).unwrap(),
+            "{\"dependencies\":{\"react\":\"18.3.0\"}}\n"
+        );
+        assert!(result.backup_path.ends_with(".bak"));
+        assert!(std::path::Path::new(&result.backup_path).exists());
+        assert_eq!(
+            std::fs::read_to_string(result.backup_path).unwrap(),
+            "{\"dependencies\":{\"react\":\"18.4.0\"}}\n"
+        );
+    }
+
+    #[test]
+    fn overwrite_rejects_non_package_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("other.json");
+        std::fs::write(&path, "{}").unwrap();
+
+        let err = overwrite_with_backup(&path, "{}").unwrap_err();
+
+        assert!(err.contains("package.json"));
     }
 }

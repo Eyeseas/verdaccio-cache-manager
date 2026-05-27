@@ -13,6 +13,7 @@ use cache_db::{CacheDb, CachedStatus, SyncInfo};
 use config::AppConfig;
 use dependency_resolver::ResolvedDep;
 use local_scanner::LocalPackage;
+use package_downgrade::{DowngradeAnalysis, OverwriteResult, SavePathResult};
 use parser::ParsedDependency;
 use registry_client::SearchResult;
 use serde::{Deserialize, Serialize};
@@ -485,6 +486,40 @@ async fn get_all_cached_packages(
 }
 
 #[tauri::command]
+async fn analyze_package_json_downgrade(
+    state: tauri::State<'_, AppState>,
+    file_path: String,
+    allow_major_downgrade: bool,
+    request_id: Option<String>,
+) -> Result<DowngradeAnalysis, String> {
+    let db = state.cache_db.lock().await;
+    let packages = db.get_all_packages()?;
+    let cached = package_downgrade::cached_map_from_packages(&packages);
+    package_downgrade::analyze_file(
+        &file_path,
+        &cached,
+        allow_major_downgrade,
+        request_id,
+    )
+}
+
+#[tauri::command]
+fn save_downgraded_package_json(
+    output_path: String,
+    content: String,
+) -> Result<SavePathResult, String> {
+    let path = package_downgrade::save_content_to_path(&PathBuf::from(&output_path), &content)?;
+    Ok(SavePathResult {
+        output_path: path.to_string_lossy().to_string(),
+    })
+}
+
+#[tauri::command]
+fn overwrite_package_json(file_path: String, content: String) -> Result<OverwriteResult, String> {
+    package_downgrade::overwrite_with_backup(&PathBuf::from(file_path), &content)
+}
+
+#[tauri::command]
 async fn start_cache_sync(
     app_handle: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
@@ -704,6 +739,9 @@ pub fn run() {
             upload_tgz_files,
             check_cached_status,
             get_all_cached_packages,
+            analyze_package_json_downgrade,
+            save_downgraded_package_json,
+            overwrite_package_json,
             start_cache_sync,
             get_sync_info,
             clear_cache_index,
