@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.1.30 (2026-05-28)
+
+### Bug Fixes
+- 修复上传 .tgz 时含嵌套 package.json（如 throttle-debounce 等 dual ESM/CJS 包的 esm/package.json）被错误识别为 unknown/0.0.0 的问题，现仅匹配 tarball 顶级 package.json (ef709ef)
+
 ## v0.1.29 (2026-05-27)
 
 ### Bug Fixes
