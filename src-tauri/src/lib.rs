@@ -9,7 +9,7 @@ pub mod storage_scanner;
 pub mod sync_engine;
 pub mod task_engine;
 
-use cache_db::{CacheDb, CachedStatus, SyncInfo};
+use cache_db::{CacheDb, CachedStatus, SyncInfo, TaskBatchSummary, TaskItemRecord};
 use config::AppConfig;
 use dependency_resolver::ResolvedDep;
 use local_scanner::LocalPackage;
@@ -136,30 +136,72 @@ pub struct CacheRequest {
     pub tarball_url: Option<String>,
 }
 
+fn cache_requests_from_failed_items(items: Vec<TaskItemRecord>) -> Vec<CacheRequest> {
+    items
+        .into_iter()
+        .map(|item| CacheRequest {
+            package_name: item.package_name,
+            version: item.version,
+            tarball_url: item.tarball_url,
+        })
+        .collect()
+}
+
+fn format_task_batch_json_report(
+    batch: &TaskBatchSummary,
+    items: &[TaskItemRecord],
+) -> Result<String, String> {
+    serde_json::to_string_pretty(&serde_json::json!({
+        "batch": batch,
+        "items": items,
+    }))
+    .map_err(|e| format!("生成 JSON 报告失败: {}", e))
+}
+
 #[tauri::command]
 async fn start_cache_tasks(
     app_handle: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     packages: Vec<CacheRequest>,
-) -> Result<(), String> {
+) -> Result<String, String> {
     let config = config::load_config(&app_handle);
 
-    let engine = TaskEngine::new(config.concurrency, config.retry_count, config.timeout_secs);
+    let batch_id = format!("batch-{}", chrono_id());
+    let engine = TaskEngine::new_with_history(
+        config.concurrency,
+        config.retry_count,
+        config.timeout_secs,
+        Some(state.cache_db.clone()),
+    );
 
     for (i, pkg) in packages.iter().enumerate() {
         let task = CacheTask {
             id: format!("task-{}-{}", chrono_id(), i),
+            batch_id: batch_id.clone(),
             package_name: pkg.package_name.clone(),
             version: pkg.version.clone(),
             tarball_url: pkg.tarball_url.clone(),
             status: TaskStatus::Pending,
             error: None,
+            error_code: None,
+            attempt_count: 0,
+            started_at: None,
+            finished_at: None,
+            duration_ms: None,
         };
         engine.add_task(task).await;
     }
 
     let source_registry = "https://registry.npmjs.org".to_string();
     let target_registry = config.registry_url.clone();
+    persist_initial_task_batch(
+        &state.cache_db,
+        &batch_id,
+        "npmjs",
+        &target_registry,
+        &engine.get_tasks().await,
+    )
+    .await?;
 
     let engine = Arc::new(engine);
     {
@@ -173,7 +215,7 @@ async fn start_cache_tasks(
         engine.execute_all(app, source_registry, target_registry).await;
     });
 
-    Ok(())
+    Ok(batch_id)
 }
 
 #[tauri::command]
@@ -186,6 +228,102 @@ async fn get_tasks(
     } else {
         Ok(vec![])
     }
+}
+
+#[tauri::command]
+async fn get_task_batches(
+    state: tauri::State<'_, AppState>,
+    limit: Option<usize>,
+) -> Result<Vec<TaskBatchSummary>, String> {
+    let db = state.cache_db.lock().await;
+    db.get_task_batches(limit.unwrap_or(20))
+}
+
+#[tauri::command]
+async fn get_task_batch_items(
+    state: tauri::State<'_, AppState>,
+    batch_id: String,
+) -> Result<Vec<TaskItemRecord>, String> {
+    let db = state.cache_db.lock().await;
+    db.get_task_batch_items(&batch_id)
+}
+
+#[tauri::command]
+async fn get_current_task_batch(
+    state: tauri::State<'_, AppState>,
+) -> Result<Option<TaskBatchSummary>, String> {
+    let batch_id = {
+        let lock = state.task_engine.lock().await;
+        match lock.as_ref() {
+            Some(engine) => engine
+                .get_tasks()
+                .await
+                .first()
+                .map(|task| task.batch_id.clone()),
+            None => None,
+        }
+    };
+
+    match batch_id {
+        Some(id) => {
+            let db = state.cache_db.lock().await;
+            db.get_task_batch(&id)
+        }
+        None => Ok(None),
+    }
+}
+
+#[tauri::command]
+async fn retry_batch_failed_tasks(
+    app_handle: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    batch_id: String,
+) -> Result<String, String> {
+    let failed = {
+        let db = state.cache_db.lock().await;
+        db.get_failed_task_items(&batch_id)?
+    };
+    if failed.is_empty() {
+        return Err("该批次没有失败任务".to_string());
+    }
+    let requests = cache_requests_from_failed_items(failed);
+    start_cache_tasks(app_handle, state, requests).await
+}
+
+#[tauri::command]
+async fn export_task_batch_report(
+    state: tauri::State<'_, AppState>,
+    batch_id: String,
+    output_path: String,
+    format: String,
+) -> Result<String, String> {
+    use tokio::fs;
+
+    let (batch, items) = {
+        let db = state.cache_db.lock().await;
+        let batch = db
+            .get_task_batch(&batch_id)?
+            .ok_or_else(|| format!("任务批次不存在: {}", batch_id))?;
+        let items = db.get_task_batch_items(&batch_id)?;
+        (batch, items)
+    };
+
+    let content = match format.as_str() {
+        "markdown" | "md" => task_engine::format_task_batch_markdown_report(&batch, &items),
+        "json" => format_task_batch_json_report(&batch, &items)?,
+        other => return Err(format!("不支持的报告格式: {}", other)),
+    };
+
+    let output = PathBuf::from(output_path);
+    if let Some(parent) = output.parent() {
+        fs::create_dir_all(parent)
+            .await
+            .map_err(|e| format!("创建报告目录失败: {}", e))?;
+    }
+    fs::write(&output, content)
+        .await
+        .map_err(|e| format!("写入报告失败: {}", e))?;
+    Ok(output.to_string_lossy().to_string())
 }
 
 #[tauri::command]
@@ -232,6 +370,47 @@ fn chrono_id() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_millis() as u64
+}
+
+async fn persist_initial_task_batch(
+    db: &Arc<Mutex<CacheDb>>,
+    batch_id: &str,
+    source: &str,
+    target_registry: &str,
+    tasks: &[CacheTask],
+) -> Result<(), String> {
+    let created_at = task_engine::timestamp_millis();
+    let db = db.lock().await;
+    db.create_task_batch(&TaskBatchSummary {
+        id: batch_id.to_string(),
+        source: source.to_string(),
+        target_registry: target_registry.to_string(),
+        created_at,
+        finished_at: None,
+        total: tasks.len(),
+        success: 0,
+        failed: 0,
+        skipped: 0,
+    })?;
+
+    for task in tasks {
+        db.insert_task_item(&TaskItemRecord {
+            id: task.id.clone(),
+            batch_id: task.batch_id.clone(),
+            package_name: task.package_name.clone(),
+            version: task.version.clone(),
+            tarball_url: task.tarball_url.clone(),
+            status: format!("{:?}", task.status),
+            error_code: task.error_code.clone(),
+            error_message: task.error.clone(),
+            attempt_count: task.attempt_count,
+            started_at: task.started_at.clone(),
+            finished_at: task.finished_at.clone(),
+            duration_ms: task.duration_ms,
+        })?;
+    }
+
+    Ok(())
 }
 
 #[tauri::command]
@@ -394,25 +573,45 @@ async fn upload_tgz_files(
     app_handle: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     file_paths: Vec<String>,
-) -> Result<(), String> {
+) -> Result<String, String> {
     let config = config::load_config(&app_handle);
-    let engine = TaskEngine::new(config.concurrency, config.retry_count, config.timeout_secs);
+    let batch_id = format!("batch-{}", chrono_id());
+    let engine = TaskEngine::new_with_history(
+        config.concurrency,
+        config.retry_count,
+        config.timeout_secs,
+        Some(state.cache_db.clone()),
+    );
 
     for (i, fp) in file_paths.iter().enumerate() {
         let path = PathBuf::from(fp);
         let pkg = local_scanner::parse_tgz_metadata(&path)?;
         let task = CacheTask {
             id: format!("upload-{}-{}", chrono_id(), i),
+            batch_id: batch_id.clone(),
             package_name: pkg.name,
             version: pkg.version,
             tarball_url: Some(format!("file://{}", fp)),
             status: TaskStatus::Pending,
             error: None,
+            error_code: None,
+            attempt_count: 0,
+            started_at: None,
+            finished_at: None,
+            duration_ms: None,
         };
         engine.add_task(task).await;
     }
 
     let target_registry = config.registry_url.clone();
+    persist_initial_task_batch(
+        &state.cache_db,
+        &batch_id,
+        "local",
+        &target_registry,
+        &engine.get_tasks().await,
+    )
+    .await?;
 
     let engine = Arc::new(engine);
     {
@@ -427,7 +626,7 @@ async fn upload_tgz_files(
             .await;
     });
 
-    Ok(())
+    Ok(batch_id)
 }
 
 #[derive(Clone, Serialize)]
@@ -648,6 +847,7 @@ async fn get_verdaccio_plugin_info(
 #[cfg(test)]
 mod plugin_export_tests {
     use super::*;
+    use cache_db::TaskItemRecord;
 
     #[test]
     fn verdaccio_plugin_resource_path_is_stable_across_plugin_versions() {
@@ -667,6 +867,66 @@ mod plugin_export_tests {
         assert_eq!(info.name, "verdaccio-cached-list");
         assert_eq!(info.version, "0.2.0");
         assert_eq!(info.filename, "verdaccio-cached-list-0.2.0.tgz");
+    }
+
+    #[test]
+    fn retry_requests_use_failed_task_identity_and_tarball_url() {
+        let failed = vec![TaskItemRecord {
+            id: "old-task".to_string(),
+            batch_id: "old-batch".to_string(),
+            package_name: "left-pad".to_string(),
+            version: "1.0.0".to_string(),
+            tarball_url: Some("file://left-pad.tgz".to_string()),
+            status: "Failed".to_string(),
+            error_code: Some("UPLOAD_FAILED".to_string()),
+            error_message: Some("boom".to_string()),
+            attempt_count: 3,
+            started_at: None,
+            finished_at: None,
+            duration_ms: None,
+        }];
+
+        let requests = cache_requests_from_failed_items(failed);
+
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].package_name, "left-pad");
+        assert_eq!(requests[0].version, "1.0.0");
+        assert_eq!(requests[0].tarball_url.as_deref(), Some("file://left-pad.tgz"));
+    }
+
+    #[test]
+    fn task_batch_json_report_contains_summary_and_items() {
+        let batch = TaskBatchSummary {
+            id: "batch-1".to_string(),
+            source: "npmjs".to_string(),
+            target_registry: "http://localhost:4873".to_string(),
+            created_at: "1".to_string(),
+            finished_at: Some("2".to_string()),
+            total: 1,
+            success: 0,
+            failed: 1,
+            skipped: 0,
+        };
+        let items = vec![TaskItemRecord {
+            id: "task-1".to_string(),
+            batch_id: "batch-1".to_string(),
+            package_name: "left-pad".to_string(),
+            version: "1.0.0".to_string(),
+            tarball_url: None,
+            status: "Failed".to_string(),
+            error_code: Some("UPLOAD_FAILED".to_string()),
+            error_message: Some("boom".to_string()),
+            attempt_count: 1,
+            started_at: None,
+            finished_at: None,
+            duration_ms: None,
+        }];
+
+        let json = format_task_batch_json_report(&batch, &items).unwrap();
+
+        assert!(json.contains("\"batch\""));
+        assert!(json.contains("\"items\""));
+        assert!(json.contains("\"left-pad\""));
     }
 }
 
@@ -729,6 +989,11 @@ pub fn run() {
             get_cached_versions,
             start_cache_tasks,
             get_tasks,
+            get_task_batches,
+            get_task_batch_items,
+            get_current_task_batch,
+            retry_batch_failed_tasks,
+            export_task_batch_report,
             retry_failed_tasks,
             clear_completed_tasks,
             parse_file,

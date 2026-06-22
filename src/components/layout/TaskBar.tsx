@@ -3,16 +3,26 @@ import { useTaskStore, CacheTask } from "@/stores/taskStore";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { useVirtualizer } from "@tanstack/react-virtual";
+import { save } from "@tauri-apps/plugin-dialog";
+import { toast } from "sonner";
 import {
   ChevronUp,
   ChevronDown,
   RotateCcw,
   Trash2,
+  FileDown,
 } from "lucide-react";
 
 export function TaskBar() {
-  const { tasks, fetchTasks, startListening, retryFailed, clearCompleted } =
-    useTaskStore();
+  const {
+    tasks,
+    currentBatchId,
+    fetchTasks,
+    startListening,
+    retryFailed,
+    clearCompleted,
+    exportBatchReport,
+  } = useTaskStore();
   const [expanded, setExpanded] = useState(false);
 
   useEffect(() => {
@@ -36,6 +46,24 @@ export function TaskBar() {
 
   const isAllDone = counts.total > 0 && counts.running === 0 && counts.pending === 0;
   const percent = counts.total > 0 ? Math.round(((counts.success + counts.skipped) / counts.total) * 100) : 0;
+  const batchLabel = currentBatchId ?? tasks[0]?.batch_id ?? null;
+
+  const handleExport = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    const batchId = batchLabel;
+    if (!batchId) return;
+    try {
+      const outputPath = await save({
+        defaultPath: `${batchId}.md`,
+        filters: [{ name: "Markdown", extensions: ["md"] }],
+      });
+      if (!outputPath) return;
+      const exportedPath = await exportBatchReport(batchId, outputPath, "markdown");
+      toast.success("任务报告已导出", { description: exportedPath });
+    } catch (err) {
+      toast.error("导出任务报告失败", { description: String(err) });
+    }
+  };
 
   if (counts.total === 0) {
     return (
@@ -60,6 +88,11 @@ export function TaskBar() {
           <span>
             任务: {counts.success}/{counts.total} 完成
           </span>
+          {batchLabel && (
+            <Badge variant="outline" className="h-5 font-mono">
+              {batchLabel}
+            </Badge>
+          )}
           {counts.running > 0 && (
             <Badge variant="default" className="h-5">
               {counts.running} 进行中
@@ -81,6 +114,17 @@ export function TaskBar() {
             <span className="text-xs text-muted-foreground">{percent}%</span>
           )}
           <div className="flex gap-1">
+            {batchLabel && (
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-7 px-2"
+                onClick={handleExport}
+              >
+                <FileDown className="mr-1 h-3 w-3" />
+                导出
+              </Button>
+            )}
             {counts.failed > 0 && (
               <Button
                 variant="ghost"
@@ -222,6 +266,21 @@ function TaskRow({ task }: { task: CacheTask }) {
       <span className="min-w-0 flex-1 truncate">
         {task.package_name}@{task.version}
       </span>
+      {task.error_code && (
+        <Badge variant="outline" className="h-5 font-mono text-[0.68rem]">
+          {task.error_code}
+        </Badge>
+      )}
+      {task.attempt_count > 0 && (
+        <span className="w-10 text-right text-xs text-muted-foreground">
+          {task.attempt_count} 次
+        </span>
+      )}
+      {task.duration_ms !== null && task.duration_ms !== undefined && (
+        <span className="w-16 text-right text-xs text-muted-foreground">
+          {task.duration_ms}ms
+        </span>
+      )}
       <span className="text-xs text-muted-foreground">
         {statusLabel(task.status)}
       </span>
