@@ -18,6 +18,7 @@ use parser::ParsedDependency;
 use registry_client::SearchResult;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::process::Command;
 use std::sync::Arc;
 use sync_engine::SyncEngine;
 use tauri::Manager;
@@ -85,6 +86,27 @@ fn save_config(
 async fn test_connection(registry_url: String) -> Result<(), String> {
     let client = registry_client::RegistryClient::new(&registry_url);
     client.test_connection().await
+}
+
+fn normalize_node_version_stdout(stdout: &[u8]) -> Result<String, String> {
+    let version = String::from_utf8_lossy(stdout).trim().to_string();
+    if version.is_empty() {
+        Err("node -v 未返回版本".to_string())
+    } else {
+        Ok(version)
+    }
+}
+
+#[tauri::command]
+fn get_node_version() -> Result<String, String> {
+    let output = Command::new("node")
+        .arg("-v")
+        .output()
+        .map_err(|e| format!("无法执行 node -v: {}", e))?;
+    if !output.status.success() {
+        return Err("node -v 执行失败".to_string());
+    }
+    normalize_node_version_stdout(&output.stdout)
 }
 
 #[tauri::command]
@@ -928,6 +950,18 @@ mod plugin_export_tests {
         assert!(json.contains("\"items\""));
         assert!(json.contains("\"left-pad\""));
     }
+
+    #[test]
+    fn normalize_node_version_stdout_trims_version() {
+        let version = normalize_node_version_stdout(b"v22.12.0\n").unwrap();
+        assert_eq!(version, "v22.12.0");
+    }
+
+    #[test]
+    fn normalize_node_version_stdout_rejects_empty_output() {
+        let err = normalize_node_version_stdout(b" \n").unwrap_err();
+        assert!(err.contains("node -v 未返回版本"));
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -982,6 +1016,7 @@ pub fn run() {
             get_config,
             save_config,
             test_connection,
+            get_node_version,
             search_packages,
             list_cached_via_plugin,
             scan_verdaccio_storage,
