@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { describe, it } from "node:test";
+import { describe, it } from "vitest";
 import {
   applyResolveProgress,
   applyResolvedPackagesForCurrentRequest,
@@ -11,7 +11,9 @@ import {
   exportPackagesFromResolvedSelection,
   getContextMenuActionState,
   getResolvedVersionOrThrow,
+  installRootKeys,
   isCurrentResolveRequest,
+  parseInstallCommand,
   pruneSelection,
   removeResolvedFromSelection,
   rowKey,
@@ -19,8 +21,8 @@ import {
   type ParsedDependency,
   type ResolvedImportPackage,
   type RowState,
-} from "../src/pages/importPageLogic.ts";
-import { positionContextMenu } from "../src/components/rowContextMenuLogic.ts";
+} from "./importPageLogic";
+import { positionContextMenu } from "../components/rowContextMenuLogic";
 
 describe("import page package resolution flow", () => {
   it("keeps cached resolved root packages for dependency resolution", () => {
@@ -366,6 +368,121 @@ describe("import page package resolution flow", () => {
         top: 436,
         submenuSide: "left",
       }
+    );
+  });
+});
+
+describe("install command parsing", () => {
+  it("parses npm local install with a default latest range", () => {
+    assert.deepEqual(parseInstallCommand("npm install react"), {
+      manager: "npm",
+      command: "install",
+      global: false,
+      packages: [{ name: "react", version: "latest", tarball_url: null }],
+      warnings: [],
+    });
+  });
+
+  it("parses npm global shorthand install", () => {
+    assert.deepEqual(parseInstallCommand("npm i -g react@19"), {
+      manager: "npm",
+      command: "i",
+      global: true,
+      packages: [{ name: "react", version: "19", tarball_url: null }],
+      warnings: [],
+    });
+  });
+
+  it("parses bun global install with scoped package", () => {
+    assert.deepEqual(
+      parseInstallCommand("bun install --global @oh-my-pi/pi-coding-agent"),
+      {
+        manager: "bun",
+        command: "install",
+        global: true,
+        packages: [
+          {
+            name: "@oh-my-pi/pi-coding-agent",
+            version: "latest",
+            tarball_url: null,
+          },
+        ],
+        warnings: [],
+      }
+    );
+  });
+
+  it("parses pnpm and yarn add commands", () => {
+    assert.deepEqual(parseInstallCommand("pnpm add vite@^7").packages, [
+      { name: "vite", version: "^7", tarball_url: null },
+    ]);
+    assert.deepEqual(parseInstallCommand("yarn add @scope/pkg@latest").packages, [
+      { name: "@scope/pkg", version: "latest", tarball_url: null },
+    ]);
+  });
+
+  it("parses multiple root packages", () => {
+    assert.deepEqual(parseInstallCommand("npm install react vite@^7 @scope/pkg").packages, [
+      { name: "react", version: "latest", tarball_url: null },
+      { name: "vite", version: "^7", tarball_url: null },
+      { name: "@scope/pkg", version: "latest", tarball_url: null },
+    ]);
+  });
+
+  it("ignores install flags and option values", () => {
+    assert.deepEqual(
+      parseInstallCommand(
+        "npm install --save-dev --registry https://registry.npmjs.org --ignore-scripts react"
+      ).packages,
+      [{ name: "react", version: "latest", tarball_url: null }]
+    );
+  });
+
+  it("supports quoted package tokens without executing shell syntax", () => {
+    assert.deepEqual(parseInstallCommand('npm install "react@^19"').packages, [
+      { name: "react", version: "^19", tarball_url: null },
+    ]);
+  });
+
+  it("rejects unsupported package specs as a whole", () => {
+    assert.throws(
+      () => parseInstallCommand("npm install react git+https://github.com/user/repo.git"),
+      /不支持的包规格: git\+https:\/\/github\.com\/user\/repo\.git/
+    );
+    assert.throws(
+      () => parseInstallCommand("npm install npm:react@19 file:../pkg ./local.tgz"),
+      /不支持的包规格: npm:react@19, file:\.\.\/pkg, \.\/local\.tgz/
+    );
+  });
+
+  it("reports missing install commands and package names", () => {
+    assert.throws(
+      () => parseInstallCommand("echo npm install react"),
+      /未找到支持的 npm\/pnpm\/yarn\/bun 安装命令/
+    );
+    assert.throws(
+      () => parseInstallCommand("npm install --save-dev"),
+      /安装命令中未包含包名/
+    );
+  });
+
+  it("parses the first install command in multi-line input and warns about additional commands", () => {
+    const result = parseInstallCommand("npm install react\npnpm add vite");
+    assert.deepEqual(result.packages, [
+      { name: "react", version: "latest", tarball_url: null },
+    ]);
+    assert.deepEqual(result.warnings, [
+      "检测到多条安装命令，当前仅解析第一条",
+    ]);
+  });
+
+  it("builds root keys from parsed packages", () => {
+    assert.deepEqual(
+      installRootKeys([
+        { name: "react", version: "latest", tarball_url: null },
+        { name: "@scope/pkg", version: "^1", tarball_url: null },
+      ]),
+      new Set([rowKey("react", "latest"), rowKey("@scope/pkg", "^1")])
     );
   });
 });

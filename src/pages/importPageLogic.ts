@@ -64,7 +64,217 @@ export interface CachedStatus {
   cached: boolean;
 }
 
+export type PackageManager = "npm" | "pnpm" | "yarn" | "bun";
+
+export interface InstallCommandParseResult {
+  manager: PackageManager;
+  command: "install" | "i" | "add";
+  global: boolean;
+  packages: ParsedDependency[];
+  warnings: string[];
+}
+
 export const rowKey = (name: string, rawRange: string) => `${name}::${rawRange}`;
+
+const packageManagers = new Set<PackageManager>(["npm", "pnpm", "yarn", "bun"]);
+const commandsByManager: Record<PackageManager, Set<string>> = {
+  npm: new Set(["install", "i"]),
+  pnpm: new Set(["install", "add"]),
+  yarn: new Set(["add"]),
+  bun: new Set(["install", "add"]),
+};
+
+const flagsWithValues = new Set([
+  "--registry",
+  "--cache",
+  "--prefix",
+  "--tag",
+  "--userconfig",
+]);
+
+const ignoredFlags = new Set([
+  "-D",
+  "--save-dev",
+  "-P",
+  "--save-prod",
+  "-O",
+  "--save-optional",
+  "-E",
+  "--save-exact",
+  "--ignore-scripts",
+  "--frozen-lockfile",
+  "--lockfile-only",
+  "--no-save",
+]);
+
+const tokenizeInstallCommandLine = (input: string) => {
+  const tokens: string[] = [];
+  let current = "";
+  let quote: '"' | "'" | null = null;
+
+  for (let i = 0; i < input.length; i += 1) {
+    const ch = input[i];
+    if (quote) {
+      if (ch === quote) {
+        quote = null;
+      } else {
+        current += ch;
+      }
+      continue;
+    }
+
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      continue;
+    }
+
+    if (/\s/.test(ch)) {
+      if (current) {
+        tokens.push(current);
+        current = "";
+      }
+      continue;
+    }
+
+    if (ch === ";" || ch === "&" || ch === "|") {
+      if (current) {
+        tokens.push(current);
+        current = "";
+      }
+      tokens.push(ch);
+      continue;
+    }
+
+    current += ch;
+  }
+
+  if (current) tokens.push(current);
+  return tokens;
+};
+
+const isCommandSeparator = (token: string) =>
+  token === ";" || token === "&" || token === "|";
+
+interface InstallCommandMatch {
+  tokens: string[];
+  manager: PackageManager;
+  command: "install" | "i" | "add";
+}
+
+const findInstallCommands = (input: string): InstallCommandMatch[] => {
+  const matches: InstallCommandMatch[] = [];
+  for (const line of input.split(/\r?\n/)) {
+    const tokens = tokenizeInstallCommandLine(line.trim());
+    if (tokens.length < 2) continue;
+    const maybeManager = tokens[0] as PackageManager;
+    const maybeCommand = tokens[1] as "install" | "i" | "add";
+    if (!packageManagers.has(maybeManager)) continue;
+    if (!commandsByManager[maybeManager].has(maybeCommand)) continue;
+    matches.push({ tokens, manager: maybeManager, command: maybeCommand });
+  }
+  return matches;
+};
+
+const isUnsupportedPackageSpec = (spec: string) =>
+  spec.startsWith("npm:") ||
+  spec.startsWith("git+") ||
+  spec.startsWith("github:") ||
+  spec.startsWith("file:") ||
+  spec.startsWith("link:") ||
+  spec.startsWith("./") ||
+  spec.startsWith("../") ||
+  /^https?:\/\//.test(spec) ||
+  spec.endsWith(".tgz");
+
+const parsePackageSpec = (spec: string): ParsedDependency | null => {
+  if (!spec || isUnsupportedPackageSpec(spec)) return null;
+
+  if (spec.startsWith("@")) {
+    const slash = spec.indexOf("/");
+    if (slash <= 1) return null;
+    const versionSep = spec.indexOf("@", slash + 1);
+    if (versionSep === -1) {
+      return { name: spec, version: "latest", tarball_url: null };
+    }
+    return {
+      name: spec.slice(0, versionSep),
+      version: spec.slice(versionSep + 1) || "latest",
+      tarball_url: null,
+    };
+  }
+
+  const versionSep = spec.indexOf("@");
+  if (versionSep === 0) return null;
+  if (versionSep === -1) {
+    return { name: spec, version: "latest", tarball_url: null };
+  }
+  return {
+    name: spec.slice(0, versionSep),
+    version: spec.slice(versionSep + 1) || "latest",
+    tarball_url: null,
+  };
+};
+
+const isOptionToken = (token: string) => token.startsWith("-");
+
+const optionName = (token: string) => token.split("=")[0];
+
+export const parseInstallCommand = (input: string): InstallCommandParseResult => {
+  const matches = findInstallCommands(input);
+  if (matches.length === 0) {
+    throw new Error("未找到支持的 npm/pnpm/yarn/bun 安装命令");
+  }
+
+  const first = matches[0];
+  const tokens = first.tokens;
+  const warnings =
+    matches.length > 1 ? ["检测到多条安装命令，当前仅解析第一条"] : [];
+  const packages: ParsedDependency[] = [];
+  const unsupported: string[] = [];
+  let global = false;
+
+  for (let i = 2; i < tokens.length; i += 1) {
+    const token = tokens[i];
+    if (isCommandSeparator(token)) break;
+    if (token === "-g" || token === "--global") {
+      global = true;
+      continue;
+    }
+    if (ignoredFlags.has(token)) continue;
+    if (isOptionToken(token)) {
+      const name = optionName(token);
+      if (flagsWithValues.has(name) && !token.includes("=")) {
+        i += 1;
+      }
+      continue;
+    }
+
+    const parsed = parsePackageSpec(token);
+    if (parsed) {
+      packages.push(parsed);
+    } else {
+      unsupported.push(token);
+    }
+  }
+
+  if (unsupported.length > 0) {
+    throw new Error(`不支持的包规格: ${unsupported.join(", ")}`);
+  }
+  if (packages.length === 0) {
+    throw new Error("安装命令中未包含包名");
+  }
+
+  return {
+    manager: first.manager,
+    command: first.command,
+    global,
+    packages,
+    warnings,
+  };
+};
+
+export const installRootKeys = (packages: ParsedDependency[]) =>
+  new Set(packages.map((pkg) => rowKey(pkg.name, pkg.version)));
 
 export const isSelectableState = (status: RowStatus) =>
   status !== "cached" &&
