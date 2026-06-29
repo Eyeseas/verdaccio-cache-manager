@@ -8,7 +8,8 @@ import { useTauriFileDrop } from "@/hooks/useTauriFileDrop";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Badge } from "@/components/ui/badge";
-import { FileInput, Loader2, FolderOpen, PackageCheck, ChevronDown, X } from "lucide-react";
+import { FileInput, Loader2, FolderOpen, PackageCheck, ChevronDown, X, TerminalSquare, Network } from "lucide-react";
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   Popover,
   PopoverContent,
@@ -32,8 +33,11 @@ import {
   getContextMenuActionState,
   getResolvedVersionOrThrow,
   getRowState,
+  installRootKeys,
   isCurrentResolveRequest,
   isSelectableState,
+  mergeResolvedDependencyList,
+  parseInstallCommand,
   pruneSelection,
   removeResolvedFromSelection,
   rowKey,
@@ -76,15 +80,25 @@ interface TaskProgressPayload {
   error: string | null;
 }
 
+type ImportInputMode = "file" | "command";
+type ImportSource = "file" | "command";
+
 export function ImportPage() {
   const { startCacheTasks, resolveDependencies } = useTaskStore();
 
+  const [inputMode, setInputMode] = useState<ImportInputMode>("file");
+  const [installCommand, setInstallCommand] = useState("");
+  const [importSource, setImportSource] = useState<ImportSource>("file");
   const [parsedDeps, setParsedDeps] = useState<ParsedDependency[]>([]);
   const [rowStates, setRowStates] = useState<Map<string, RowState>>(new Map());
   const [checking, setChecking] = useState(false);
   const [loading, setLoading] = useState(false);
   const [fileName, setFileName] = useState<string | null>(null);
   const [selected, setSelected] = useState<Set<number>>(new Set());
+  const [rootKeys, setRootKeys] = useState<Set<string>>(new Set());
+  const [nodeVersion, setNodeVersion] = useState<string | null>(null);
+  const [nodeVersionChecked, setNodeVersionChecked] = useState(false);
+  const [dependencyResolved, setDependencyResolved] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [resolving, setResolving] = useState(false);
   const [caching, setCaching] = useState(false);
@@ -162,6 +176,55 @@ export function ImportPage() {
     }
   }, []);
 
+  const resetImportState = useCallback(() => {
+    setParsedDeps([]);
+    setSelected(new Set());
+    setRowStates(new Map());
+    setError(null);
+    setRootKeys(new Set());
+    setDependencyResolved(false);
+    resolveRequestIdRef.current = null;
+  }, []);
+
+  const loadNodeVersion = useCallback(async () => {
+    setNodeVersionChecked(false);
+    try {
+      const version = await invoke<string>("get_node_version");
+      setNodeVersion(version);
+    } catch (_) {
+      setNodeVersion(null);
+    } finally {
+      setNodeVersionChecked(true);
+    }
+  }, []);
+
+  const handleParseInstallCommand = useCallback(async () => {
+    resetImportState();
+    setLoading(true);
+    try {
+      const result = parseInstallCommand(installCommand);
+      for (const warning of result.warnings) {
+        toast.warning(warning);
+      }
+      const init = new Map<string, RowState>();
+      for (const dep of result.packages) {
+        init.set(rowKey(dep.name, dep.version), { status: "unknown" });
+      }
+      setImportSource("command");
+      setFileName("安装命令");
+      setRootKeys(installRootKeys(result.packages));
+      setRowStates(init);
+      pendingInitSelectionRef.current = true;
+      setParsedDeps(result.packages);
+      void loadNodeVersion();
+      await checkCachedStatus(result.packages);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : `解析失败: ${e}`);
+    } finally {
+      setLoading(false);
+    }
+  }, [checkCachedStatus, installCommand, loadNodeVersion, resetImportState]);
+
   const handleSelectFile = async () => {
     const file = await open({
       multiple: false,
@@ -179,11 +242,10 @@ export function ImportPage() {
   const parseFile = useCallback(
     async (filePath: string) => {
       setLoading(true);
-      setParsedDeps([]);
-      setSelected(new Set());
-      setRowStates(new Map());
-      setError(null);
-      resolveRequestIdRef.current = null;
+      resetImportState();
+      setImportSource("file");
+      setNodeVersion(null);
+      setNodeVersionChecked(false);
       setFileName(filePath.split("/").pop() || filePath);
 
       try {
@@ -211,7 +273,7 @@ export function ImportPage() {
         setLoading(false);
       }
     },
-    [checkCachedStatus]
+    [checkCachedStatus, resetImportState]
   );
 
   useEffect(() => {
@@ -346,6 +408,67 @@ export function ImportPage() {
       }
     } catch (e) {
       console.error("依赖解析失败:", e);
+    } finally {
+      setResolving(false);
+    }
+  };
+
+  const handleResolveFullDependencies = async () => {
+    if (parsedDeps.length === 0 || rootKeys.size === 0) return;
+
+    const rootEntries = parsedDeps
+      .map((dep, index) => ({ dep, index }))
+      .filter(({ dep }) => rootKeys.has(rowKey(dep.name, dep.version)));
+    const inputs = rootEntries.map(({ dep }) => ({
+      package_name: dep.name,
+      version: dep.version,
+      tarball_url: dep.tarball_url || undefined,
+    }));
+    if (inputs.length === 0) return;
+
+    markRowsResolving(rootEntries.map(({ index }) => index));
+    const requestId = createResolveRequestId();
+    resolveRequestIdRef.current = requestId;
+    setResolving(true);
+    setError(null);
+    try {
+      const directlyResolved = await invoke<ResolvedImportPackage[]>(
+        "resolve_package_versions",
+        { packages: inputs, requestId }
+      );
+      if (!isCurrentResolveRequest(resolveRequestIdRef.current, requestId)) {
+        return;
+      }
+      setRowStates((prev) => applyResolvedPackages(prev, directlyResolved));
+      if (directlyResolved.length !== inputs.length) {
+        setError("部分根包无法解析到具体版本，请检查失败行后重试");
+        return;
+      }
+
+      const roots = dependencyRootsFromResolved(directlyResolved);
+      const resolved = await resolveDependencies(roots);
+      if (!isCurrentResolveRequest(resolveRequestIdRef.current, requestId)) {
+        return;
+      }
+
+      const merged = mergeResolvedDependencyList({
+        currentRoots: rootKeys,
+        rootPackages: directlyResolved,
+        dependencies: resolved,
+      });
+      const init = new Map<string, RowState>();
+      for (const dep of merged.dependencies) {
+        init.set(rowKey(dep.name, dep.version), { status: "unknown" });
+      }
+      setParsedDeps(merged.dependencies);
+      setRootKeys(merged.rootKeys);
+      setRowStates(init);
+      pendingInitSelectionRef.current = true;
+      setDependencyResolved(true);
+      await checkCachedStatus(merged.dependencies);
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      setError(`完整依赖解析失败: ${message}`);
     } finally {
       setResolving(false);
     }
@@ -554,7 +677,7 @@ export function ImportPage() {
 
   const { isOver: dropIsOver } = useTauriFileDrop({
     zoneRef: dropZoneRef,
-    enabled: parsedDeps.length === 0 && !loading,
+    enabled: inputMode === "file" && parsedDeps.length === 0 && !loading,
     filter: isDependencyFile,
     onDrop: async (paths) => {
       if (paths[0]) await parseFile(paths[0]);
@@ -569,19 +692,60 @@ export function ImportPage() {
         <div
           ref={dropZoneRef}
           className={`flex flex-1 flex-col items-center justify-center rounded-lg border-2 border-dashed p-12 text-center transition-colors ${
-            dropIsOver ? "border-primary bg-primary/5" : ""
+            dropIsOver && inputMode === "file" ? "border-primary bg-primary/5" : ""
           }`}
         >
-          <FileInput className="mb-4 h-12 w-12 text-muted-foreground" />
-          <p className="mb-2 text-lg font-medium">拖入文件或点击选择</p>
-          <p className="mb-4 text-sm text-muted-foreground">
-            支持 package.json、pnpm-lock.yaml、package-lock.json
-          </p>
-          {error && <p className="mb-4 text-sm text-destructive">{error}</p>}
-          <Button variant="outline" onClick={handleSelectFile}>
-            <FolderOpen className="mr-2 h-4 w-4" />
-            选择文件
-          </Button>
+          <Tabs
+            value={inputMode}
+            onValueChange={(value) => setInputMode(value as ImportInputMode)}
+            className="mb-6 items-center"
+          >
+            <TabsList>
+              <TabsTrigger value="file">依赖文件</TabsTrigger>
+              <TabsTrigger value="command">安装命令</TabsTrigger>
+            </TabsList>
+          </Tabs>
+
+          {inputMode === "file" ? (
+            <>
+              <FileInput className="mb-4 h-12 w-12 text-muted-foreground" />
+              <p className="mb-2 text-lg font-medium">拖入文件或点击选择</p>
+              <p className="mb-4 text-sm text-muted-foreground">
+                支持 package.json、pnpm-lock.yaml、package-lock.json
+              </p>
+              {error && <p className="mb-4 text-sm text-destructive">{error}</p>}
+              <Button variant="outline" onClick={handleSelectFile}>
+                <FolderOpen className="mr-2 h-4 w-4" />
+                选择文件
+              </Button>
+            </>
+          ) : (
+            <div className="flex w-full max-w-2xl flex-col items-stretch">
+              <TerminalSquare className="mx-auto mb-4 h-12 w-12 text-muted-foreground" />
+              <label htmlFor="install-command" className="mb-2 text-lg font-medium">
+                粘贴安装命令
+              </label>
+              <textarea
+                id="install-command"
+                aria-label="安装命令"
+                value={installCommand}
+                onChange={(event) => setInstallCommand(event.target.value)}
+                placeholder="npm install react@19 vite 或 bun install -g @oh-my-pi/pi-coding-agent"
+                className="min-h-28 resize-y rounded-md border bg-background px-3 py-2 text-left font-mono text-sm outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50"
+              />
+              <p className="mt-2 text-sm text-muted-foreground">
+                支持 npm、pnpm、yarn、bun 的 install/add 命令。
+              </p>
+              {error && <p className="mt-3 text-sm text-destructive">{error}</p>}
+              <Button
+                className="mt-4 self-center"
+                onClick={handleParseInstallCommand}
+                disabled={installCommand.trim().length === 0}
+              >
+                解析命令
+              </Button>
+            </div>
+          )}
         </div>
       )}
 
@@ -597,11 +761,40 @@ export function ImportPage() {
           <div className="mb-3 flex items-center justify-between">
             <div className="flex items-center gap-3">
               <Badge variant="outline">{fileName}</Badge>
+              {importSource === "command" && (
+                <Badge variant="outline">
+                  {nodeVersionChecked && nodeVersion
+                    ? `Node ${nodeVersion}`
+                    : nodeVersionChecked
+                      ? "Node 未检测到"
+                      : "Node 检测中"}
+                </Badge>
+              )}
               <span className="text-sm text-muted-foreground">
                 共 {parsedDeps.length} 个依赖，{uncachedCount} 个未缓存
               </span>
             </div>
             <div className="flex gap-2">
+              {importSource === "command" && !dependencyResolved && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={handleResolveFullDependencies}
+                  disabled={resolving || caching || exporting}
+                >
+                  {resolving ? (
+                    <>
+                      <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                      解析中...
+                    </>
+                  ) : (
+                    <>
+                      <Network className="mr-2 h-4 w-4" />
+                      解析完整依赖
+                    </>
+                  )}
+                </Button>
+              )}
               <Button variant="ghost" size="sm" onClick={selectAllUncached}>
                 全选未缓存
               </Button>
@@ -658,6 +851,11 @@ export function ImportPage() {
                     <span className="min-w-0 flex-1 truncate font-mono text-sm">
                       {dep.name}
                     </span>
+                    {rootKeys.has(rowKey(dep.name, dep.version)) && (
+                      <Badge variant="outline" className="shrink-0">
+                        根包
+                      </Badge>
+                    )}
                     {renderVersion(dep, state)}
                     {renderBadge(state)}
                   </div>
