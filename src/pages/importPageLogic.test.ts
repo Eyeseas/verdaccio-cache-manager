@@ -13,6 +13,7 @@ import {
   getResolvedVersionOrThrow,
   installRootKeys,
   isCurrentResolveRequest,
+  mergeResolvedDependencyList,
   parseInstallCommand,
   pruneSelection,
   removeResolvedFromSelection,
@@ -484,5 +485,58 @@ describe("install command parsing", () => {
       ]),
       new Set([rowKey("react", "latest"), rowKey("@scope/pkg", "^1")])
     );
+  });
+});
+
+describe("install command dependency list merge", () => {
+  it("preserves root markers after root ranges resolve to concrete versions", () => {
+    const result = mergeResolvedDependencyList({
+      currentRoots: new Set([rowKey("react", "latest")]),
+      rootPackages: [
+        {
+          name: "react",
+          raw_range: "latest",
+          version: "19.1.0",
+          tarball_url: null,
+          cached: false,
+        },
+      ],
+      dependencies: [
+        { package_name: "react", version: "19.1.0" },
+        { package_name: "loose-envify", version: "1.4.0" },
+      ],
+    });
+
+    assert.deepEqual(result.dependencies, [
+      { name: "react", version: "19.1.0", tarball_url: null },
+      { name: "loose-envify", version: "1.4.0", tarball_url: null },
+    ]);
+    assert.deepEqual(result.rootKeys, new Set([rowKey("react", "19.1.0")]));
+  });
+
+  it("deduplicates dependencies and keeps root rows first", () => {
+    const result = mergeResolvedDependencyList({
+      currentRoots: new Set([rowKey("vite", "^7")]),
+      rootPackages: [
+        {
+          name: "vite",
+          raw_range: "^7",
+          version: "7.0.4",
+          tarball_url: null,
+          cached: false,
+        },
+      ],
+      dependencies: [
+        { package_name: "debug", version: "4.4.1" },
+        { package_name: "vite", version: "7.0.4" },
+        { package_name: "debug", version: "4.4.1" },
+      ],
+    });
+
+    assert.deepEqual(result.dependencies, [
+      { name: "vite", version: "7.0.4", tarball_url: null },
+      { name: "debug", version: "4.4.1", tarball_url: null },
+    ]);
+    assert.deepEqual(result.rootKeys, new Set([rowKey("vite", "7.0.4")]));
   });
 });

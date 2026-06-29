@@ -453,6 +453,49 @@ export const dependencyRootsFromResolved = (
     version: pkg.version,
   }));
 
+export interface MergedDependencyList {
+  dependencies: ParsedDependency[];
+  rootKeys: Set<string>;
+}
+
+export const mergeResolvedDependencyList = (args: {
+  currentRoots: Set<string>;
+  rootPackages: ResolvedImportPackage[];
+  dependencies: ResolvedDependency[];
+}): MergedDependencyList => {
+  const output: ParsedDependency[] = [];
+  const seen = new Set<string>();
+  const rootKeys = new Set<string>();
+
+  for (const root of args.rootPackages) {
+    const resolvedKey = rowKey(root.name, root.version);
+    if (args.currentRoots.has(rowKey(root.name, root.raw_range))) {
+      rootKeys.add(resolvedKey);
+    }
+    if (!seen.has(resolvedKey)) {
+      seen.add(resolvedKey);
+      output.push({
+        name: root.name,
+        version: root.version,
+        tarball_url: root.tarball_url,
+      });
+    }
+  }
+
+  for (const dep of args.dependencies) {
+    const key = rowKey(dep.package_name, dep.version);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    output.push({
+      name: dep.package_name,
+      version: dep.version,
+      tarball_url: null,
+    });
+  }
+
+  return { dependencies: output, rootKeys };
+};
+
 export const cacheTaskInputsFromDependencies = (
   resolved: ResolvedDependency[],
   cachedStatuses: CachedStatus[]
