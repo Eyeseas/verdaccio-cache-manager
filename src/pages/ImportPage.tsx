@@ -20,15 +20,18 @@ import { RowContextMenu, type ContextMenuPosition } from "@/components/RowContex
 import { toast } from "sonner";
 import { downloadWithProgress } from "@/lib/downloadSummary";
 import {
+  allowDependencyExpansion,
   applyResolveProgress,
   applyResolvedPackagesForCurrentRequest,
   applyResolvedPackages,
   applyTaskProgress,
   areSelectionsEqual,
+  baseNameFromPath,
   cacheTaskInputsFromDependencies,
   cacheTaskInputsFromResolved,
   createResolveRequestId,
   dependencyRootsFromResolved,
+  detectImportFileKind,
   exportPackagesFromResolvedSelection,
   getContextMenuActionState,
   getResolvedVersionOrThrow,
@@ -42,6 +45,7 @@ import {
   removeResolvedFromSelection,
   rowKey,
   shouldShowActionBar,
+  type ImportFileKind,
   type ParsedDependency,
   type ResolveProgressPayload,
   type ResolvedImportPackage,
@@ -94,6 +98,7 @@ export function ImportPage() {
   const [checking, setChecking] = useState(false);
   const [loading, setLoading] = useState(false);
   const [fileName, setFileName] = useState<string | null>(null);
+  const [fileKind, setFileKind] = useState<ImportFileKind | null>(null);
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [rootKeys, setRootKeys] = useState<Set<string>>(new Set());
   const [nodeVersion, setNodeVersion] = useState<string | null>(null);
@@ -182,6 +187,7 @@ export function ImportPage() {
     setRowStates(new Map());
     setError(null);
     setRootKeys(new Set());
+    setFileKind(null);
     setDependencyResolved(false);
     resolveRequestIdRef.current = null;
   }, []);
@@ -246,7 +252,8 @@ export function ImportPage() {
       setImportSource("file");
       setNodeVersion(null);
       setNodeVersionChecked(false);
-      setFileName(filePath.split("/").pop() || filePath);
+      setFileName(baseNameFromPath(filePath));
+      setFileKind(detectImportFileKind(filePath));
 
       try {
         const parsed = await invoke<ParsedDependency[]>("parse_file", {
@@ -599,6 +606,8 @@ export function ImportPage() {
     caching,
     exporting,
   });
+  // lockfile 列表本身即完整闭包，禁用"及依赖"类操作避免重新展开引入不一致版本
+  const depsExpansionAllowed = allowDependencyExpansion(importSource, fileKind);
 
   const renderBadge = (state: RowState) => {
     switch (state.status) {
@@ -712,6 +721,8 @@ export function ImportPage() {
               <p className="mb-2 text-lg font-medium">拖入文件或点击选择</p>
               <p className="mb-4 text-sm text-muted-foreground">
                 支持 package.json、pnpm-lock.yaml、package-lock.json
+                <br />
+                推荐使用 lockfile —— 离线场景可获得与安装一致的精确依赖闭包
               </p>
               {error && <p className="mb-4 text-sm text-destructive">{error}</p>}
               <Button variant="outline" onClick={handleSelectFile}>
@@ -761,6 +772,15 @@ export function ImportPage() {
           <div className="mb-3 flex items-center justify-between">
             <div className="flex items-center gap-3">
               <Badge variant="outline">{fileName}</Badge>
+              {importSource === "file" && fileKind === "lockfile" && (
+                <Badge
+                  variant="outline"
+                  className="border-blue-300 text-blue-600"
+                  title="依赖列表来自 lockfile，已是完整闭包，无需再解析依赖"
+                >
+                  Lockfile 精确闭包
+                </Badge>
+              )}
               {importSource === "command" && (
                 <Badge variant="outline">
                   {nodeVersionChecked && nodeVersion
@@ -971,20 +991,22 @@ export function ImportPage() {
                   disabled={resolving || caching}
                   onExportingChange={setExporting}
                 />
-                <Button
-                  variant="outline"
-                  onClick={handleCacheWithDeps}
-                  disabled={resolving || caching || exporting}
-                >
-                  {resolving ? (
-                    <>
-                      <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                      解析依赖中...
-                    </>
-                  ) : (
-                    "缓存包及依赖"
-                  )}
-                </Button>
+                {depsExpansionAllowed && (
+                  <Button
+                    variant="outline"
+                    onClick={handleCacheWithDeps}
+                    disabled={resolving || caching || exporting}
+                  >
+                    {resolving ? (
+                      <>
+                        <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                        解析依赖中...
+                      </>
+                    ) : (
+                      "缓存包及依赖"
+                    )}
+                  </Button>
+                )}
                 <Button
                   onClick={handleCache}
                   disabled={resolving || caching || exporting}
@@ -1017,9 +1039,17 @@ export function ImportPage() {
               position={contextMenu.position}
               onClose={() => setContextMenu(null)}
               onCache={() => handleContextCache(contextMenu.index)}
-              onCacheWithDeps={() => handleContextCacheWithDeps(contextMenu.index)}
+              onCacheWithDeps={
+                depsExpansionAllowed
+                  ? () => handleContextCacheWithDeps(contextMenu.index)
+                  : undefined
+              }
               onExportTarball={() => handleContextExportTarball(contextMenu.index)}
-              onExportTarballWithDeps={() => handleContextExportTarballWithDeps(contextMenu.index)}
+              onExportTarballWithDeps={
+                depsExpansionAllowed
+                  ? () => handleContextExportTarballWithDeps(contextMenu.index)
+                  : undefined
+              }
               cacheDisabled={actionState.cacheDisabled}
               exportDisabled={actionState.exportDisabled}
             />

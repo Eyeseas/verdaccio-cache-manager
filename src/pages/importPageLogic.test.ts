@@ -1,13 +1,16 @@
 import assert from "node:assert/strict";
 import { describe, it } from "vitest";
 import {
+  allowDependencyExpansion,
   applyResolveProgress,
   applyResolvedPackagesForCurrentRequest,
   applyResolvedPackages,
   areSelectionsEqual,
+  baseNameFromPath,
   cacheTaskInputsFromResolved,
   cacheTaskInputsFromDependencies,
   dependencyRootsFromResolved,
+  detectImportFileKind,
   exportPackagesFromResolvedSelection,
   getContextMenuActionState,
   getResolvedVersionOrThrow,
@@ -538,5 +541,35 @@ describe("install command dependency list merge", () => {
       { name: "debug", version: "4.4.1", tarball_url: null },
     ]);
     assert.deepEqual(result.rootKeys, new Set([rowKey("vite", "7.0.4")]));
+  });
+});
+
+describe("lockfile import mode", () => {
+  it("detects lockfile kind for windows and posix paths", () => {
+    assert.equal(
+      detectImportFileKind("C:\\proj\\package-lock.json"),
+      "lockfile"
+    );
+    assert.equal(detectImportFileKind("/a/b/pnpm-lock.yaml"), "lockfile");
+    assert.equal(detectImportFileKind("/a/b/package.json"), "manifest");
+    assert.equal(
+      detectImportFileKind("C:\\proj\\sub/package.json"),
+      "manifest"
+    );
+  });
+
+  it("extracts base name from mixed separator paths", () => {
+    assert.equal(baseNameFromPath("C:\\a\\b\\package-lock.json"), "package-lock.json");
+    assert.equal(baseNameFromPath("/a/b/pnpm-lock.yaml"), "pnpm-lock.yaml");
+    assert.equal(baseNameFromPath("C:\\a/b\\package.json"), "package.json");
+    assert.equal(baseNameFromPath("package.json"), "package.json");
+  });
+
+  it("disallows dependency expansion only for lockfile file imports", () => {
+    assert.equal(allowDependencyExpansion("file", "lockfile"), false);
+    assert.equal(allowDependencyExpansion("file", "manifest"), true);
+    assert.equal(allowDependencyExpansion("file", null), true);
+    assert.equal(allowDependencyExpansion("command", null), true);
+    assert.equal(allowDependencyExpansion("command", "lockfile"), true);
   });
 });

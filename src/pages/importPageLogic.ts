@@ -298,6 +298,27 @@ export const shouldShowActionBar = (state: {
 }) =>
   state.selectedSize > 0 || state.resolving || state.caching || state.exporting;
 
+export type ImportFileKind = "manifest" | "lockfile";
+
+const LOCKFILE_NAMES = ["package-lock.json", "pnpm-lock.yaml"];
+
+/** 取路径最后一段文件名，兼容 Windows 反斜杠与 POSIX 斜杠混合路径 */
+export const baseNameFromPath = (filePath: string): string =>
+  filePath.replace(/\\/g, "/").split("/").pop() || filePath;
+
+/** 判定导入文件类型：lockfile 是精确依赖闭包，manifest（package.json）是范围声明 */
+export const detectImportFileKind = (filePath: string): ImportFileKind =>
+  LOCKFILE_NAMES.includes(baseNameFromPath(filePath)) ? "lockfile" : "manifest";
+
+/**
+ * lockfile 导入的列表本身就是完整闭包，再走递归依赖展开既无必要，
+ * 又可能解析出与 lockfile 锁定不一致的版本，因此禁用"及依赖"类操作。
+ */
+export const allowDependencyExpansion = (
+  source: "file" | "command",
+  kind: ImportFileKind | null
+): boolean => source === "command" || kind !== "lockfile";
+
 export const getRowState = (
   states: Map<string, RowState>,
   dep: ParsedDependency
