@@ -116,6 +116,10 @@ pub fn parse_pnpm_lock(content: &str) -> Result<Vec<ParsedDependency>, String> {
         for (key, value) in packages {
             if let Some(key_str) = key.as_str() {
                 if let Some((name, version)) = parse_pnpm_package_key(key_str) {
+                    // 过滤 git/file/link 等非 registry 条目（版本恒为精确 semver）
+                    if pinned_version(&version).is_none() {
+                        continue;
+                    }
                     let dep_key = format!("{}@{}", name, version);
                     if seen.contains_key(&dep_key) {
                         continue;
@@ -141,6 +145,10 @@ pub fn parse_pnpm_lock(content: &str) -> Result<Vec<ParsedDependency>, String> {
             for (key, _) in snapshots {
                 if let Some(key_str) = key.as_str() {
                     if let Some((name, version)) = parse_pnpm_package_key(key_str) {
+                        // 同 packages 循环：过滤非 registry 条目
+                        if pinned_version(&version).is_none() {
+                            continue;
+                        }
                         let dep_key = format!("{}@{}", name, version);
                         if seen.contains_key(&dep_key) {
                             continue;
@@ -163,15 +171,18 @@ pub fn parse_pnpm_lock(content: &str) -> Result<Vec<ParsedDependency>, String> {
 fn parse_pnpm_package_key(key: &str) -> Option<(String, String)> {
     // Strip optional leading '/'
     let key = key.strip_prefix('/').unwrap_or(key);
+    // 先剥离括号 peer 后缀（v6/v9 如 "name@1.2.3(react@18.2.0)"），
+    // 避免后续 rfind('@') 误命中括号内的 '@'
+    let key = key.split('(').next().unwrap_or(key);
 
     // Try '@' separator first (v6+/v9 format: "name@version" or "@scope/name@version")
     // For scoped packages, we need the LAST '@' that isn't at position 0
     if let Some(at_pos) = find_version_separator(key) {
         let name = &key[..at_pos];
-        let version = &key[at_pos + 1..];
-        // Strip any trailing parenthesized peer info like "(react@18.2.0)"
-        let version = version.split('(').next().unwrap_or(version).trim();
-        if !name.is_empty() && !version.is_empty() {
+        let version = key[at_pos + 1..].trim();
+        // 包名合法性校验：v5 peer 后缀 key（"/foo/1.2.3_react@16.14.0"）会被
+        // '@' 分支误切出含 '/' 的名字，此时回落 v5 分支处理
+        if is_valid_package_name(name) && !version.is_empty() {
             return Some((name.to_string(), version.to_string()));
         }
     }
@@ -182,6 +193,25 @@ fn parse_pnpm_package_key(key: &str) -> Option<(String, String)> {
     }
 
     None
+}
+
+/// npm 包名合法性：scoped 名恰含一个 '/'（两段非空），非 scoped 名不含 '/'；
+/// 均不得含 ':' 或空白。
+fn is_valid_package_name(name: &str) -> bool {
+    if name.is_empty() || name.contains(':') || name.contains(char::is_whitespace) {
+        return false;
+    }
+    match name.strip_prefix('@') {
+        Some(rest) => {
+            let mut parts = rest.splitn(2, '/');
+            matches!(
+                (parts.next(), parts.next()),
+                (Some(scope), Some(pkg))
+                    if !scope.is_empty() && !pkg.is_empty() && !pkg.contains('/')
+            )
+        }
+        None => !name.contains('/'),
+    }
 }
 
 fn find_version_separator(key: &str) -> Option<usize> {
@@ -196,12 +226,16 @@ fn find_version_separator(key: &str) -> Option<usize> {
 
 fn parse_v5_key(key: &str) -> Option<(String, String)> {
     // v5 format: "package-name/1.2.3" or "@scope/package-name/1.2.3"
+    // 版本可带 '_' peer 后缀（如 "1.2.3_react@16.14.0"），需剥离
     if key.starts_with('@') {
         // @scope/name/version - find the second '/'
         let after_scope = key.find('/')? + 1;
         let version_slash = key[after_scope..].find('/')?;
         let name = &key[..after_scope + version_slash];
-        let version = &key[after_scope + version_slash + 1..];
+        let version = key[after_scope + version_slash + 1..]
+            .split('_')
+            .next()
+            .unwrap_or_default();
         if !version.is_empty() && version.chars().next()?.is_ascii_digit() {
             return Some((name.to_string(), version.to_string()));
         }
@@ -209,7 +243,7 @@ fn parse_v5_key(key: &str) -> Option<(String, String)> {
         // name/version - find the last '/' where what follows starts with a digit
         if let Some(slash_pos) = key.rfind('/') {
             let name = &key[..slash_pos];
-            let version = &key[slash_pos + 1..];
+            let version = key[slash_pos + 1..].split('_').next().unwrap_or_default();
             if !name.is_empty() && !version.is_empty() && version.chars().next()?.is_ascii_digit() {
                 return Some((name.to_string(), version.to_string()));
             }
@@ -657,5 +691,116 @@ mod tests {
         let content = r#"{ "lockfileVersion": 1 }"#;
         let err = parse_package_lock(content).unwrap_err();
         assert!(err.contains("无法识别"), "无依赖字段应报错: {}", err);
+    }
+
+    #[test]
+    fn parse_pnpm_lock_v9_basic_and_peer_suffix() {
+        let content = r#"
+lockfileVersion: '9.0'
+packages:
+  foo@1.2.3:
+    resolution: {integrity: sha512-xxx}
+  '@scope/bar@2.0.0(react@18.2.0)':
+    resolution: {integrity: sha512-yyy}
+"#;
+        let deps = parse_pnpm_lock(content).unwrap();
+        assert_eq!(deps.len(), 2);
+        assert!(deps.iter().any(|d| d.name == "foo" && d.version == "1.2.3"));
+        assert!(
+            deps.iter()
+                .any(|d| d.name == "@scope/bar" && d.version == "2.0.0"),
+            "括号 peer 后缀应剥离: {:?}",
+            deps
+        );
+    }
+
+    #[test]
+    fn parse_pnpm_lock_filters_git_and_file_entries() {
+        let content = r#"
+lockfileVersion: '9.0'
+packages:
+  pkg@https://codeload.github.com/u/r/tar.gz/abc123:
+    resolution: {tarball: https://codeload.github.com/u/r/tar.gz/abc123}
+  local@file:../local:
+    resolution: {directory: ../local, type: directory}
+  normal@1.0.0:
+    resolution: {integrity: sha512-zzz}
+"#;
+        let deps = parse_pnpm_lock(content).unwrap();
+        assert_eq!(deps.len(), 1, "git/file 条目应被过滤: {:?}", deps);
+        assert_eq!(deps[0].name, "normal");
+        assert_eq!(deps[0].version, "1.0.0");
+    }
+
+    #[test]
+    fn parse_pnpm_lock_v6_leading_slash_keys() {
+        let content = r#"
+lockfileVersion: '6.0'
+packages:
+  /foo@1.2.3(peer@1.0.0):
+    resolution: {integrity: sha512-xxx}
+  /@scope/baz@0.5.0:
+    resolution: {integrity: sha512-yyy}
+"#;
+        let deps = parse_pnpm_lock(content).unwrap();
+        assert_eq!(deps.len(), 2);
+        assert!(deps.iter().any(|d| d.name == "foo" && d.version == "1.2.3"));
+        assert!(deps
+            .iter()
+            .any(|d| d.name == "@scope/baz" && d.version == "0.5.0"));
+    }
+
+    #[test]
+    fn parse_pnpm_lock_v5_peer_suffix_with_at() {
+        // 回归：v5 peer 后缀含 '@' 时曾被 '@' 分支误切成
+        // name="foo/1.2.3_react"、version="16.14.0"
+        let content = r#"
+lockfileVersion: 5.4
+packages:
+  /foo/1.2.3_react@16.14.0:
+    resolution: {integrity: sha512-xxx}
+  /@scope/bar/2.0.0_vue@3.0.0:
+    resolution: {integrity: sha512-yyy}
+"#;
+        let deps = parse_pnpm_lock(content).unwrap();
+        assert_eq!(deps.len(), 2, "{:?}", deps);
+        assert!(
+            deps.iter().any(|d| d.name == "foo" && d.version == "1.2.3"),
+            "v5 peer 后缀应剥离: {:?}",
+            deps
+        );
+        assert!(deps
+            .iter()
+            .any(|d| d.name == "@scope/bar" && d.version == "2.0.0"));
+    }
+
+    #[test]
+    fn parse_pnpm_lock_v9_snapshots_fallback() {
+        // 仅有 snapshots 时走 fallback，且同样过滤非 semver 条目
+        let content = r#"
+lockfileVersion: '9.0'
+snapshots:
+  foo@1.2.3: {}
+  gitpkg@https://codeload.github.com/u/r/tar.gz/abc: {}
+"#;
+        let deps = parse_pnpm_lock(content).unwrap();
+        assert_eq!(deps.len(), 1, "{:?}", deps);
+        assert_eq!(deps[0].name, "foo");
+        assert_eq!(deps[0].version, "1.2.3");
+    }
+
+    #[test]
+    fn parse_pnpm_lock_dedups_same_name_version() {
+        // 同包同版本不同 peer 组合 → 单条
+        let content = r#"
+lockfileVersion: '9.0'
+packages:
+  foo@1.2.3(react@17.0.0):
+    resolution: {integrity: sha512-xxx}
+  foo@1.2.3(react@18.2.0):
+    resolution: {integrity: sha512-xxx}
+"#;
+        let deps = parse_pnpm_lock(content).unwrap();
+        assert_eq!(deps.len(), 1, "同包同版本应去重: {:?}", deps);
     }
 }
