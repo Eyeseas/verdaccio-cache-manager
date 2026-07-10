@@ -263,9 +263,70 @@ pub fn parse_package_lock(content: &str) -> Result<Vec<ParsedDependency>, String
                 });
             }
         }
+    } else if let Some(deps_obj) = json["dependencies"].as_object() {
+        // lockfileVersion 1（npm 6）：无 packages 字段，只有嵌套 dependencies 树
+        collect_v1_dependencies(deps_obj, &mut deps, &mut seen);
+    } else {
+        return Err(
+            "无法识别的 package-lock.json 格式（缺少 packages/dependencies 字段）".to_string(),
+        );
     }
 
     Ok(deps)
+}
+
+/// 递归遍历 lockfileVersion 1 的嵌套 dependencies 树。
+/// v1 alias 语义：version 形如 "npm:real-pkg@1.2.3"，真名/真版本在其中。
+fn collect_v1_dependencies(
+    deps_obj: &serde_json::Map<String, serde_json::Value>,
+    out: &mut Vec<ParsedDependency>,
+    seen: &mut HashMap<String, bool>,
+) {
+    for (key, value) in deps_obj {
+        // bundled 依赖随父包 tarball 分发，无独立 registry 产物
+        let bundled = value["bundled"].as_bool() == Some(true)
+            || value["inBundle"].as_bool() == Some(true);
+
+        if !bundled {
+            if let Some(raw_version) = value["version"].as_str() {
+                // alias："npm:real-pkg@1.2.3" → 名取 real-pkg，版本取 1.2.3
+                let (name, version) = match raw_version.strip_prefix("npm:") {
+                    Some(alias) => match alias.rfind('@') {
+                        Some(pos) if pos > 0 => {
+                            (alias[..pos].to_string(), alias[pos + 1..].to_string())
+                        }
+                        _ => (key.clone(), raw_version.to_string()),
+                    },
+                    None => (key.clone(), raw_version.to_string()),
+                };
+
+                let tarball_url = value["resolved"].as_str().map(|s| s.to_string());
+                // git/file 等非 registry 来源跳过；v1 的 git 依赖 version 本身即 URL，一并过滤
+                let non_registry = tarball_url
+                    .as_ref()
+                    .is_some_and(|u| !u.starts_with("http://") && !u.starts_with("https://"))
+                    || version.contains(':')
+                    || version.contains('/');
+
+                if !non_registry && !version.is_empty() {
+                    let dep_key = format!("{}@{}", name, version);
+                    if !seen.contains_key(&dep_key) {
+                        seen.insert(dep_key, true);
+                        out.push(ParsedDependency {
+                            name,
+                            version,
+                            tarball_url,
+                        });
+                    }
+                }
+            }
+        }
+
+        // 嵌套子依赖仍需递归（即使父级被过滤）
+        if let Some(child) = value["dependencies"].as_object() {
+            collect_v1_dependencies(child, out, seen);
+        }
+    }
 }
 
 /// 从 lockfile packages 路径提取包名:取最后一个 "node_modules/" 之后的部分
@@ -532,5 +593,69 @@ mod tests {
         }"#;
         let deps = parse_package_lock(content).unwrap();
         assert!(deps.is_empty(), "根条目不应产出依赖");
+    }
+
+    #[test]
+    fn parse_package_lock_v1_recurses_nested_dependencies() {
+        // v1：嵌套 dependencies 树，含同名不同版本
+        let content = r#"{
+            "lockfileVersion": 1,
+            "dependencies": {
+                "foo": {
+                    "version": "3.0.0",
+                    "resolved": "https://registry.npmjs.org/foo/-/foo-3.0.0.tgz",
+                    "dependencies": {
+                        "bar": { "version": "2.0.0", "resolved": "https://registry.npmjs.org/bar/-/bar-2.0.0.tgz" }
+                    }
+                },
+                "bar": { "version": "1.0.0", "resolved": "https://registry.npmjs.org/bar/-/bar-1.0.0.tgz" }
+            }
+        }"#;
+        let deps = parse_package_lock(content).unwrap();
+        assert_eq!(deps.len(), 3, "应递归收集全部嵌套依赖");
+        let bars = find(&deps, "bar");
+        assert_eq!(bars.len(), 2, "同名不同版本都保留");
+    }
+
+    #[test]
+    fn parse_package_lock_v1_alias_version_field() {
+        let content = r#"{
+            "lockfileVersion": 1,
+            "dependencies": {
+                "my-alias": { "version": "npm:foo@2.0.0" },
+                "scoped-alias": { "version": "npm:@scope/real@1.5.0" }
+            }
+        }"#;
+        let deps = parse_package_lock(content).unwrap();
+        assert_eq!(deps.len(), 2);
+        assert!(deps
+            .iter()
+            .any(|d| d.name == "foo" && d.version == "2.0.0"));
+        assert!(deps
+            .iter()
+            .any(|d| d.name == "@scope/real" && d.version == "1.5.0"));
+    }
+
+    #[test]
+    fn parse_package_lock_v1_skips_bundled_and_git() {
+        let content = r#"{
+            "lockfileVersion": 1,
+            "dependencies": {
+                "bundled-dep": { "version": "1.0.0", "bundled": true },
+                "git-dep": { "version": "git+https://github.com/u/r.git#abc" },
+                "git-resolved": { "version": "1.0.0", "resolved": "git+ssh://git@github.com/u/r.git#abc" },
+                "normal": { "version": "1.0.0" }
+            }
+        }"#;
+        let deps = parse_package_lock(content).unwrap();
+        assert_eq!(deps.len(), 1, "bundled/git 条目应被过滤");
+        assert_eq!(deps[0].name, "normal");
+    }
+
+    #[test]
+    fn parse_package_lock_unrecognized_format_errors() {
+        let content = r#"{ "lockfileVersion": 1 }"#;
+        let err = parse_package_lock(content).unwrap_err();
+        assert!(err.contains("无法识别"), "无依赖字段应报错: {}", err);
     }
 }
