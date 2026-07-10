@@ -230,9 +230,28 @@ pub fn parse_package_lock(content: &str) -> Result<Vec<ParsedDependency>, String
             if key.is_empty() {
                 continue;
             }
-            let name = extract_package_name_from_path(key);
+            // workspace 软链条目指向本地目录,无 registry 产物
+            if value["link"].as_bool() == Some(true) {
+                continue;
+            }
+            // 路径不含 node_modules/ 的是 workspace 源目录(如 "packages/foo"),跳过
+            let path_name = match extract_package_name_from_path(key) {
+                Some(n) => n,
+                None => continue,
+            };
+            // npm alias:路径是别名目录,条目内 "name" 字段才是 registry 真名
+            let name = value["name"]
+                .as_str()
+                .map(|s| s.to_string())
+                .unwrap_or(path_name);
             let version = value["version"].as_str().unwrap_or_default().to_string();
             let tarball_url = value["resolved"].as_str().map(|s| s.to_string());
+            // git/file 等非 registry 来源无法从 registry 缓存,跳过
+            if let Some(url) = &tarball_url {
+                if !url.starts_with("http://") && !url.starts_with("https://") {
+                    continue;
+                }
+            }
 
             let dep_key = format!("{}@{}", name, version);
             if !version.is_empty() && !seen.contains_key(&dep_key) {
@@ -249,9 +268,14 @@ pub fn parse_package_lock(content: &str) -> Result<Vec<ParsedDependency>, String
     Ok(deps)
 }
 
-fn extract_package_name_from_path(path: &str) -> String {
-    let path = path.strip_prefix("node_modules/").unwrap_or(path);
-    path.to_string()
+/// 从 lockfile packages 路径提取包名:取最后一个 "node_modules/" 之后的部分
+/// (嵌套条目如 "node_modules/foo/node_modules/bar" → "bar")。
+/// 路径不含 node_modules/ 时返回 None(workspace 源目录条目)。
+fn extract_package_name_from_path(path: &str) -> Option<String> {
+    const MARKER: &str = "node_modules/";
+    path.rfind(MARKER)
+        .map(|pos| path[pos + MARKER.len()..].to_string())
+        .filter(|n| !n.is_empty())
 }
 
 pub fn detect_and_parse(file_path: &Path) -> Result<Vec<ParsedDependency>, String> {
@@ -412,5 +436,101 @@ mod tests {
             "optionalDependencies 同名项即使不可解析，也应覆盖并移除 dependencies 旧条目"
         );
         assert!(deps.iter().any(|d| d.name == "keep"));
+    }
+
+    fn find<'a>(deps: &'a [ParsedDependency], name: &str) -> Vec<&'a ParsedDependency> {
+        deps.iter().filter(|d| d.name == name).collect()
+    }
+
+    #[test]
+    fn parse_package_lock_nested_node_modules_takes_last_segment() {
+        // 嵌套版本冲突：顶层 bar@1.0.0 + foo 下嵌套 bar@2.0.0
+        let content = r#"{
+            "lockfileVersion": 3,
+            "packages": {
+                "": { "name": "root", "version": "0.0.0" },
+                "node_modules/bar": { "version": "1.0.0", "resolved": "https://registry.npmjs.org/bar/-/bar-1.0.0.tgz" },
+                "node_modules/foo": { "version": "3.0.0", "resolved": "https://registry.npmjs.org/foo/-/foo-3.0.0.tgz" },
+                "node_modules/foo/node_modules/bar": { "version": "2.0.0", "resolved": "https://registry.npmjs.org/bar/-/bar-2.0.0.tgz" }
+            }
+        }"#;
+        let deps = parse_package_lock(content).unwrap();
+        let bars = find(&deps, "bar");
+        assert_eq!(bars.len(), 2, "嵌套条目应取最后一段包名，两个版本都保留");
+        let versions: Vec<&str> = bars.iter().map(|d| d.version.as_str()).collect();
+        assert!(versions.contains(&"1.0.0") && versions.contains(&"2.0.0"));
+        assert!(
+            deps.iter().all(|d| !d.name.contains("node_modules")),
+            "不应出现含 node_modules 的坏名字"
+        );
+    }
+
+    #[test]
+    fn parse_package_lock_nested_scoped_package() {
+        let content = r#"{
+            "packages": {
+                "node_modules/foo/node_modules/@scope/baz": { "version": "1.2.3" }
+            }
+        }"#;
+        let deps = parse_package_lock(content).unwrap();
+        assert_eq!(deps.len(), 1);
+        assert_eq!(deps[0].name, "@scope/baz");
+        assert_eq!(deps[0].version, "1.2.3");
+    }
+
+    #[test]
+    fn parse_package_lock_skips_link_and_workspace_entries() {
+        // workspace 源目录条目 + link 软链条目均应跳过
+        let content = r#"{
+            "packages": {
+                "": { "name": "root", "version": "0.0.0" },
+                "packages/app": { "name": "app", "version": "1.0.0" },
+                "node_modules/app": { "link": true, "resolved": "packages/app" },
+                "node_modules/real": { "version": "1.0.0" }
+            }
+        }"#;
+        let deps = parse_package_lock(content).unwrap();
+        assert_eq!(deps.len(), 1);
+        assert_eq!(deps[0].name, "real");
+    }
+
+    #[test]
+    fn parse_package_lock_alias_uses_name_field() {
+        // npm alias：路径是别名，条目内 name 字段才是 registry 真名
+        let content = r#"{
+            "packages": {
+                "node_modules/my-alias": { "name": "real-pkg", "version": "1.2.3" }
+            }
+        }"#;
+        let deps = parse_package_lock(content).unwrap();
+        assert_eq!(deps.len(), 1);
+        assert_eq!(deps[0].name, "real-pkg");
+        assert_eq!(deps[0].version, "1.2.3");
+    }
+
+    #[test]
+    fn parse_package_lock_skips_git_and_file_resolved() {
+        let content = r#"{
+            "packages": {
+                "node_modules/git-dep": { "version": "1.0.0", "resolved": "git+ssh://git@github.com/u/r.git#abc" },
+                "node_modules/local-dep": { "version": "1.0.0", "resolved": "file:../local" },
+                "node_modules/no-resolved": { "version": "2.0.0" }
+            }
+        }"#;
+        let deps = parse_package_lock(content).unwrap();
+        assert_eq!(deps.len(), 1, "git/file 来源应被过滤");
+        assert_eq!(deps[0].name, "no-resolved");
+        assert!(deps[0].tarball_url.is_none());
+    }
+
+    #[test]
+    fn parse_package_lock_root_entry_skipped() {
+        let content = r#"{
+            "packages": {
+                "": { "name": "root", "version": "9.9.9" }
+            }
+        }"#;
+        let deps = parse_package_lock(content).unwrap();
+        assert!(deps.is_empty(), "根条目不应产出依赖");
     }
 }
