@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.1.33 (2026-07-10)
+
+### Bug Fixes
+- 修复 CI 构建失败：测试文件引用 node:assert/strict 但 @types/node 未在 devDependencies 中显式声明，导致干净安装后 tsc 类型检查报 TS2307 (d23ac78)
+
 ## v0.1.32 (2026-07-10)
 
 ### Features
