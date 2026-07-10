@@ -391,29 +391,50 @@ pub fn detect_and_parse(file_path: &Path) -> Result<Vec<ParsedDependency>, Strin
 pub async fn resolve_single(
     http: &reqwest::Client,
     sem: &Arc<Semaphore>,
-    cache: &Arc<Mutex<HashMap<String, Arc<Vec<String>>>>>,
+    cache: &Arc<Mutex<HashMap<String, Arc<PackageVersions>>>>,
     name: &str,
     raw_range: &str,
-) -> Option<String> {
+) -> Result<String, String> {
     if let Some(v) = pinned_version(raw_range) {
-        return Some(v);
+        return Ok(v);
     }
 
-    let versions = {
+    let pkg = {
         let map = cache.lock().await;
         map.get(name).cloned()
     };
-    let versions = match versions {
+    let pkg = match pkg {
         Some(v) => v,
         None => {
-            let fetched = fetch_versions(http, sem, name).await.ok()?;
+            let fetched = fetch_versions(http, sem, name).await?;
             let arc = Arc::new(fetched);
             cache.lock().await.insert(name.to_string(), arc.clone());
             arc
         }
     };
 
-    resolve_max_satisfying(raw_range, &versions)
+    resolve_from_metadata(raw_range, &pkg)
+}
+
+/// 依据包元数据把 range 或 dist-tag 解析为具体版本。
+pub fn resolve_from_metadata(raw_range: &str, pkg: &PackageVersions) -> Result<String, String> {
+    // 合法 semver range（含 "*"、"^1"、"1.x" 等）走 range 匹配
+    if node_semver::Range::parse(raw_range).is_ok() {
+        return resolve_max_satisfying(raw_range, &pkg.versions)
+            .ok_or_else(|| format!("没有满足范围 {} 的已发布版本", raw_range));
+    }
+
+    // 非 range 视为 dist-tag（latest / next / beta …）
+    if let Some(v) = pkg.dist_tags.get(raw_range) {
+        return Ok(v.clone());
+    }
+    // registry 元数据缺 dist-tags 时，latest 兜底取最大版本
+    if raw_range == "latest" {
+        if let Some(v) = resolve_max_satisfying("*", &pkg.versions) {
+            return Ok(v);
+        }
+    }
+    Err(format!("无法识别的版本范围或 dist-tag: {}", raw_range))
 }
 
 /// Resolves raw semver ranges in dependency entries to concrete versions by
@@ -422,7 +443,7 @@ pub async fn resolve_single(
 pub async fn resolve_version_ranges(deps: Vec<ParsedDependency>) -> Vec<ParsedDependency> {
     let http = reqwest::Client::new();
     let sem = Arc::new(Semaphore::new(10));
-    let versions_cache: Arc<Mutex<HashMap<String, Arc<Vec<String>>>>> =
+    let versions_cache: Arc<Mutex<HashMap<String, Arc<PackageVersions>>>> =
         Arc::new(Mutex::new(HashMap::new()));
 
     let mut handles = Vec::with_capacity(deps.len());
@@ -431,7 +452,9 @@ pub async fn resolve_version_ranges(deps: Vec<ParsedDependency>) -> Vec<ParsedDe
         let sem = sem.clone();
         let cache = versions_cache.clone();
         handles.push(tokio::spawn(async move {
-            let resolved = resolve_single(&http, &sem, &cache, &dep.name, &dep.version).await?;
+            let resolved = resolve_single(&http, &sem, &cache, &dep.name, &dep.version)
+                .await
+                .ok()?;
             Some(ParsedDependency {
                 name: dep.name,
                 version: resolved,
@@ -449,11 +472,18 @@ pub async fn resolve_version_ranges(deps: Vec<ParsedDependency>) -> Vec<ParsedDe
     out
 }
 
+/// npm registry 上一个包的版本清单及 dist-tags（latest / next / beta …）。
+#[derive(Debug, Clone)]
+pub struct PackageVersions {
+    pub versions: Vec<String>,
+    pub dist_tags: HashMap<String, String>,
+}
+
 pub async fn fetch_versions(
     http: &reqwest::Client,
     sem: &Arc<Semaphore>,
     name: &str,
-) -> Result<Vec<String>, String> {
+) -> Result<PackageVersions, String> {
     let _permit = sem.acquire().await.map_err(|e| e.to_string())?;
     let url = format!("https://registry.npmjs.org/{}", name);
     let resp = http
@@ -461,16 +491,30 @@ pub async fn fetch_versions(
         .header("accept", "application/json")
         .send()
         .await
-        .map_err(|e| e.to_string())?;
-    if !resp.status().is_success() {
-        return Err(format!("HTTP {}", resp.status()));
+        .map_err(|e| format!("请求 registry 失败: {}", e))?;
+    if resp.status() == reqwest::StatusCode::NOT_FOUND {
+        return Err("registry 上不存在该包 (HTTP 404)".to_string());
     }
-    let body: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("registry 返回 HTTP {}", resp.status()));
+    }
+    let body: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("registry 响应解析失败: {}", e))?;
     let versions = body["versions"]
         .as_object()
         .map(|v| v.keys().cloned().collect())
         .unwrap_or_default();
-    Ok(versions)
+    let dist_tags = body["dist-tags"]
+        .as_object()
+        .map(|m| {
+            m.iter()
+                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok(PackageVersions { versions, dist_tags })
 }
 
 pub fn resolve_max_satisfying(range_str: &str, available: &[String]) -> Option<String> {
@@ -487,6 +531,54 @@ pub fn resolve_max_satisfying(range_str: &str, available: &[String]) -> Option<S
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn meta(versions: &[&str], tags: &[(&str, &str)]) -> PackageVersions {
+        PackageVersions {
+            versions: versions.iter().map(|s| s.to_string()).collect(),
+            dist_tags: tags
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn resolve_from_metadata_supports_latest_dist_tag() {
+        let pkg = meta(&["1.0.0", "2.0.0", "3.0.0-beta.1"], &[("latest", "2.0.0")]);
+        assert_eq!(resolve_from_metadata("latest", &pkg).unwrap(), "2.0.0");
+    }
+
+    #[test]
+    fn resolve_from_metadata_supports_custom_dist_tags() {
+        let pkg = meta(&["1.0.0", "3.0.0-beta.1"], &[("beta", "3.0.0-beta.1")]);
+        assert_eq!(resolve_from_metadata("beta", &pkg).unwrap(), "3.0.0-beta.1");
+    }
+
+    #[test]
+    fn resolve_from_metadata_latest_falls_back_to_max_version() {
+        let pkg = meta(&["1.0.0", "2.5.1"], &[]);
+        assert_eq!(resolve_from_metadata("latest", &pkg).unwrap(), "2.5.1");
+    }
+
+    #[test]
+    fn resolve_from_metadata_range_still_works() {
+        let pkg = meta(&["1.0.0", "1.9.3", "2.0.0"], &[("latest", "2.0.0")]);
+        assert_eq!(resolve_from_metadata("^1.0.0", &pkg).unwrap(), "1.9.3");
+    }
+
+    #[test]
+    fn resolve_from_metadata_reports_unsatisfiable_range() {
+        let pkg = meta(&["1.0.0"], &[("latest", "1.0.0")]);
+        let err = resolve_from_metadata("^9.0.0", &pkg).unwrap_err();
+        assert!(err.contains("^9.0.0"), "错误应包含原始 range: {err}");
+    }
+
+    #[test]
+    fn resolve_from_metadata_reports_unknown_tag() {
+        let pkg = meta(&["1.0.0"], &[("latest", "1.0.0")]);
+        let err = resolve_from_metadata("canary", &pkg).unwrap_err();
+        assert!(err.contains("canary"), "错误应包含未知 tag: {err}");
+    }
 
     #[test]
     fn parse_package_json_dedups_optional_overriding_dependencies() {

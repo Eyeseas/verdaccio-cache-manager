@@ -473,7 +473,7 @@ async fn resolve_package_versions(
 
     let http = reqwest::Client::new();
     let sem = Arc::new(Semaphore::new(10));
-    let versions_cache: Arc<Mutex<HashMap<String, Arc<Vec<String>>>>> =
+    let versions_cache: Arc<Mutex<HashMap<String, Arc<parser::PackageVersions>>>> =
         Arc::new(Mutex::new(HashMap::new()));
     let db = state.cache_db.clone();
 
@@ -490,8 +490,11 @@ async fn resolve_package_versions(
             let name = pkg.package_name.clone();
             let raw_range = pkg.version.clone();
 
-            let resolved =
-                parser::resolve_single(&http, &sem, &cache, &name, &raw_range).await;
+            let (resolved, error) =
+                match parser::resolve_single(&http, &sem, &cache, &name, &raw_range).await {
+                    Ok(v) => (Some(v), None),
+                    Err(e) => (None, Some(e)),
+                };
 
             let cached = if let Some(ref v) = resolved {
                 let db_lock = db.lock().await;
@@ -502,12 +505,6 @@ async fn resolve_package_versions(
                     .unwrap_or(false)
             } else {
                 false
-            };
-
-            let error = if resolved.is_none() {
-                Some("无法解析版本".to_string())
-            } else {
-                None
             };
 
             let _ = app.emit(

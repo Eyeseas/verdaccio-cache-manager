@@ -868,9 +868,17 @@ export function ImportPage() {
                     ) : (
                       <span className="h-4 w-4" />
                     )}
-                    <span className="min-w-0 flex-1 truncate font-mono text-sm">
-                      {dep.name}
-                    </span>
+                    <div className="min-w-0 flex-1">
+                      <div className="truncate font-mono text-sm">{dep.name}</div>
+                      {state.error && (
+                        <div
+                          className="truncate text-xs text-red-500"
+                          title={state.error}
+                        >
+                          {state.error}
+                        </div>
+                      )}
+                    </div>
                     {rootKeys.has(rowKey(dep.name, dep.version)) && (
                       <Badge variant="outline" className="shrink-0">
                         根包
