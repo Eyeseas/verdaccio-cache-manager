@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.1.32 (2026-07-10)
+
+### Features
+- 新增安装命令导入：粘贴 npm/pnpm/yarn/bun 的 install/add 命令即可解析根包并展开完整依赖，展示本机 Node 版本 (2341b33, 429247f, d50dd7e, 13b00ea)
+- package-lock.json 支持 lockfileVersion 1（npm 6 嵌套 dependencies 树），含 v1 alias 与 bundled/git 条目过滤 (e1e8d32)
+- lockfile 导入模式区分：显示"Lockfile 精确闭包"标识，禁用"缓存包及依赖"等重新展开操作，避免引入与 lockfile 不一致的版本 (303cf3b)
+- 依赖递归解析纳入 peerDependencies（npm 7+ 自动安装 peer），按 best-effort 处理失败不中断，离线缓存集覆盖更完整 (fe1b3f0)
+
+### Bug Fixes
+- 修复 package-lock.json 嵌套条目（node_modules/foo/node_modules/bar）解析出错误包名导致离线安装 404 的问题；同时跳过 link/workspace/git/file 条目并支持 npm alias 真名 (bd70471)
+- 修复 pnpm-lock.yaml 把 git/file 依赖的 URL 当版本号、v5 含 "@" 的 peer 后缀 key 被误切分的问题 (7d9cb0e)
+
 ## v0.1.31 (2026-06-22)
 
 ### Features
