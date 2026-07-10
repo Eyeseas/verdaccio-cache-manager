@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.1.34 (2026-07-10)
+
+### Bug Fixes
+- 修复安装命令导入不带版本号的包（latest 等 dist-tag）必然解析失败的问题：解析链路支持 dist-tags（latest/next/beta…），并把 404、网络错误、range 不满足等真实原因传给前端，导入列表在包名下方直接展示失败原因而非仅 hover 提示 (56bebe2)
+
 ## v0.1.33 (2026-07-10)
 
 ### Bug Fixes
