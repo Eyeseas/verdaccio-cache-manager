@@ -144,6 +144,8 @@ pub async fn resolve_all(
 /// 从 version 元数据提取依赖。required 与 optional 合并；
 /// 同名时按 npm 语义 optionalDependencies 覆盖 dependencies（采用 optional
 /// 的版本范围，且安装失败可继续）。
+/// peerDependencies 也纳入（npm 7+ 会自动安装 peer），按 optional 处理：
+/// best-effort 解析，失败不阻断整体，且不覆盖同名的 regular/optional 声明。
 fn extract_deps(body: &serde_json::Value) -> Vec<DepSpec> {
     let mut map: HashMap<String, (String, bool)> = HashMap::new();
     if let Some(obj) = body["dependencies"].as_object() {
@@ -155,6 +157,13 @@ fn extract_deps(body: &serde_json::Value) -> Vec<DepSpec> {
     if let Some(obj) = body["optionalDependencies"].as_object() {
         for (k, v) in obj {
             map.insert(k.clone(), (v.as_str().unwrap_or("*").to_string(), true));
+        }
+    }
+    // peerDependencies 仅在同名不存在时插入，视作 optional
+    if let Some(obj) = body["peerDependencies"].as_object() {
+        for (k, v) in obj {
+            map.entry(k.clone())
+                .or_insert_with(|| (v.as_str().unwrap_or("*").to_string(), true));
         }
     }
     map.into_iter()
@@ -311,6 +320,32 @@ mod tests {
         assert!(extract_deps(&body).is_empty());
     }
 
+    #[test]
+    fn extract_deps_includes_peer_as_optional() {
+        // npm 7+ 自动安装 peer，需纳入缓存集；按 optional 处理失败不阻断
+        let body = json!({
+            "dependencies": { "use-sync-external-store": "^1.0.0" },
+            "peerDependencies": { "react": "^18.0.0" }
+        });
+        let deps = extract_deps(&body);
+        let peer = find(&deps, "react").expect("peer 依赖应被提取");
+        assert_eq!(peer.range, "^18.0.0");
+        assert!(peer.optional, "peer 应标记为可选（best-effort）");
+    }
+
+    #[test]
+    fn extract_deps_peer_does_not_override_regular_dep() {
+        let body = json!({
+            "dependencies": { "shared": "^2.0.0" },
+            "peerDependencies": { "shared": ">=1" }
+        });
+        let deps = extract_deps(&body);
+        assert_eq!(deps.len(), 1);
+        let entry = find(&deps, "shared").unwrap();
+        assert_eq!(entry.range, "^2.0.0", "同名时应保留 dependencies 的范围");
+        assert!(!entry.optional, "同名时不应被 peer 降级为可选");
+    }
+
     mod resolve_all_failure_tolerance {
         use super::*;
         use wiremock::matchers::{method, path};
@@ -422,6 +457,60 @@ mod tests {
                 res.is_err(),
                 "同一包版本后续以 required 身份触达时不能被 optional visited 跳过"
             );
+        }
+
+        #[tokio::test]
+        async fn peer_dependency_is_resolved_and_included() {
+            let server = MockServer::start().await;
+            // root a 声明 peer react —— npm 7+ 会自动安装，应进入缓存集
+            mock_meta(
+                &server,
+                "a",
+                json!({ "peerDependencies": { "react": "1.0.0" } }),
+            )
+            .await;
+            mock_version_list(&server, "react").await;
+            mock_meta(&server, "react", json!({})).await;
+
+            let res = resolve_all(vec![("a".into(), "1.0.0".into())], &server.uri()).await;
+            let names: Vec<String> = res
+                .expect("peer 正常时应整体成功")
+                .into_iter()
+                .map(|d| d.package_name)
+                .collect();
+            assert!(names.contains(&"react".to_string()), "peer 依赖应被解析并纳入");
+        }
+
+        #[tokio::test]
+        async fn peer_dependency_failure_does_not_abort() {
+            let server = MockServer::start().await;
+            mock_meta(
+                &server,
+                "a",
+                json!({
+                    "dependencies": { "b": "1.0.0" },
+                    "peerDependencies": { "p": "1.0.0" }
+                }),
+            )
+            .await;
+            mock_version_list(&server, "b").await;
+            mock_version_list(&server, "p").await;
+            mock_meta(&server, "b", json!({})).await;
+            // peer p 的版本元数据 500 —— peer 按 optional 处理，跳过不中断
+            Mock::given(method("GET"))
+                .and(path("/p/1.0.0"))
+                .respond_with(ResponseTemplate::new(500))
+                .mount(&server)
+                .await;
+
+            let res = resolve_all(vec![("a".into(), "1.0.0".into())], &server.uri()).await;
+            let names: Vec<String> = res
+                .expect("peer 子树失败不应中断整体解析")
+                .into_iter()
+                .map(|d| d.package_name)
+                .collect();
+            assert!(names.contains(&"a".to_string()));
+            assert!(names.contains(&"b".to_string()), "必需依赖应被解析");
         }
     }
 }
