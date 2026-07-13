@@ -5,9 +5,10 @@
 <h1 align="center">Verdaccio Cache Manager</h1>
 
 <p align="center">
-  <img alt="version" src="https://img.shields.io/badge/version-0.1.34-blue" />
-  <img alt="platform" src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey" />
-  <img alt="license" src="https://img.shields.io/badge/license-MIT-green" />
+  <img alt="version" src="https://img.shields.io/badge/version-0.1.34-blue?style=for-the-badge" />
+  <img alt="platform" src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey?style=for-the-badge" />
+  <img alt="license" src="https://img.shields.io/badge/license-MIT-green?style=for-the-badge" />
+  <img alt="Fable 5" src="https://img.shields.io/badge/Fable-5-d97757?style=for-the-badge" />
 </p>
 
 一个用于把 npm 包预热到私有 [Verdaccio](https://verdaccio.org/) 的桌面应用。覆盖三种场景：
