@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.1.36 (2026-10-15)
+
+### Features
+- 依赖解析按 npm 客户端（npm-pick-manifest）规则选版本：优先 latest，其次未废弃且 engines.node 兼容的版本，使预热结果与实际 npm install 一致；设置中新增可选的「目标 Node 版本」，留空则使用本机 Node 版本 (1a1a785)
+
+### Bug Fixes
+- 修复从 Finder/Dock 启动的安装版显示「Node 未检测到」的问题：GUI 进程只继承精简 PATH，现通过登录 shell 读取完整 PATH 定位 nvm/Homebrew 安装的 node (1a1a785)
+
 ## v0.1.35 (2026-10-15)
 
 ### Bug Fixes
