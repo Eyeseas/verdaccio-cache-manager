@@ -34,6 +34,7 @@ import {
   PopoverTrigger,
 } from "@/components/ui/popover";
 import { ExportDropdown } from "@/components/ExportDropdown";
+import { DependencyResolveStatus } from "@/components/DependencyResolveStatus";
 import { toast } from "sonner";
 import {
   RowContextMenu,
@@ -706,6 +707,8 @@ export function SearchPage() {
           )
         )}
       </div>
+
+      <DependencyResolveStatus active={resolving} className="mt-3" />
 
       {totalSelected > 0 && (
         <div className="-mx-6 -mb-6 mt-4 flex items-center justify-between border-t bg-background px-6 py-3">

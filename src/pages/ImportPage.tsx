@@ -16,6 +16,7 @@ import {
   PopoverTrigger,
 } from "@/components/ui/popover";
 import { ExportDropdown } from "@/components/ExportDropdown";
+import { DependencyResolveStatus } from "@/components/DependencyResolveStatus";
 import { RowContextMenu, type ContextMenuPosition } from "@/components/RowContextMenu";
 import { toast } from "sonner";
 import { downloadWithProgress } from "@/lib/downloadSummary";
@@ -826,6 +827,8 @@ export function ImportPage() {
               </Button>
             </div>
           </div>
+
+          <DependencyResolveStatus active={resolving} className="mb-3" />
 
           <div
             ref={listRef}

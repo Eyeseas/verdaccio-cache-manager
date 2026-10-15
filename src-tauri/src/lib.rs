@@ -539,12 +539,29 @@ async fn resolve_package_versions(
 }
 
 #[tauri::command]
-async fn resolve_dependencies(packages: Vec<CacheRequest>) -> Result<Vec<ResolvedDep>, String> {
+async fn resolve_dependencies(
+    app_handle: tauri::AppHandle,
+    packages: Vec<CacheRequest>,
+) -> Result<Vec<ResolvedDep>, String> {
+    use tauri::Emitter;
     let initial: Vec<(String, String)> = packages
         .into_iter()
         .map(|p| (p.package_name, p.version))
         .collect();
-    dependency_resolver::resolve_all(initial, "https://registry.npmjs.org").await
+    let mut last_emit: Option<std::time::Instant> = None;
+    dependency_resolver::resolve_all_with_progress(
+        initial,
+        "https://registry.npmjs.org",
+        |progress| {
+            // 节流到 ~10 次/秒；层结束（in_flight 为 0）时总是推送
+            let due = last_emit.map_or(true, |t| t.elapsed().as_millis() >= 100);
+            if due || progress.in_flight == 0 {
+                let _ = app_handle.emit("dependency-resolve-progress", progress);
+                last_emit = Some(std::time::Instant::now());
+            }
+        },
+    )
+    .await
 }
 
 #[derive(serde::Serialize, Clone)]

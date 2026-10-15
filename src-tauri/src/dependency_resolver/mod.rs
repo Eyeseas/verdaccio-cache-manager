@@ -1,11 +1,41 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::Semaphore;
+use tokio::task::JoinSet;
+
+/// 同时进行的 packument 请求数上限。
+const MAX_CONCURRENT_FETCHES: usize = 16;
+/// 网络错误 / 限流 / 网关错误时的最大尝试次数。
+const MAX_FETCH_ATTEMPTS: u32 = 3;
+/// npm 精简元数据（abbreviated packument）：只含安装所需字段，
+/// 体积通常只有完整文档的几分之一，且已包含每个版本的依赖声明。
+const ABBREVIATED_ACCEPT: &str =
+    "application/vnd.npm.install-v1+json; q=1.0, application/json; q=0.8, */*";
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ResolvedDep {
     pub package_name: String,
     pub version: String,
+}
+
+/// 依赖解析进度，用于前端展示，判断是否卡住、卡在哪。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ResolveProgress {
+    /// 已纳入结果集的包版本数
+    pub resolved: usize,
+    /// 已完成的元数据请求数（含失败）
+    pub fetched: usize,
+    /// 失败的元数据请求数
+    pub failed: usize,
+    /// 当前层仍在等待响应的请求数
+    pub in_flight: usize,
+    /// 当前 BFS 层级（从 1 开始）
+    pub depth: usize,
+    /// 最近完成的包名
+    pub current: Option<String>,
+    /// 部分仍在等待响应的包名（最多 3 个），用于定位慢请求
+    pub waiting: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -33,109 +63,217 @@ struct DepSpec {
     optional: bool,
 }
 
-/// BFS 待处理节点。`optional_ctx` 表示该节点是否位于某个 optional 子树内
-/// （一旦进入即保持 best-effort，子树解析失败时跳过而非中断整体）。
+/// BFS 待处理节点。`range` 为版本范围（根包为精确版本）；`optional_ctx`
+/// 表示该节点是否位于某个 optional 子树内（一旦进入即保持 best-effort，
+/// 子树解析失败时跳过而非中断整体）。
 struct QueueItem {
     name: String,
-    version: String,
+    range: String,
     optional_ctx: bool,
+}
+
+/// 单个包名的元数据：一次请求同时得到版本列表、dist-tags 与各版本依赖。
+struct Packument {
+    versions: Vec<String>,
+    dist_tags: HashMap<String, String>,
+    manifests: serde_json::Map<String, serde_json::Value>,
+}
+
+impl Packument {
+    fn from_json(mut body: serde_json::Value) -> Self {
+        let manifests = match body.get_mut("versions").map(serde_json::Value::take) {
+            Some(serde_json::Value::Object(m)) => m,
+            _ => serde_json::Map::new(),
+        };
+        let dist_tags = body["dist-tags"]
+            .as_object()
+            .map(|o| {
+                o.iter()
+                    .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                    .collect()
+            })
+            .unwrap_or_default();
+        Self {
+            versions: manifests.keys().cloned().collect(),
+            dist_tags,
+            manifests,
+        }
+    }
+
+    fn resolve(&self, range: &str) -> Option<String> {
+        if let Some(v) = self.dist_tags.get(range) {
+            return Some(v.clone());
+        }
+        resolve_version(range, &self.versions).or_else(|| match node_semver::Range::parse(range) {
+            // 无法解析的范围（git/url/alias 等）退回 latest
+            Err(_) => self.dist_tags.get("latest").cloned(),
+            Ok(_) => None,
+        })
+    }
 }
 
 pub async fn resolve_all(
     packages: Vec<(String, String)>,
     registry: &str,
 ) -> Result<Vec<ResolvedDep>, String> {
-    let http = reqwest::Client::new();
-    let semaphore = Arc::new(Semaphore::new(10));
-    let mut visited: HashMap<(String, String), VisitState> = HashMap::new();
-    let mut result: Vec<ResolvedDep> = Vec::new();
+    resolve_all_with_progress(packages, registry, |_| {}).await
+}
+
+/// 按 BFS 层级解析完整依赖闭包：每层先并发拉取本层所有未缓存包名的
+/// packument，再在内存中完成版本匹配与下一层展开。
+pub async fn resolve_all_with_progress<F>(
+    packages: Vec<(String, String)>,
+    registry: &str,
+    mut on_progress: F,
+) -> Result<Vec<ResolvedDep>, String>
+where
+    F: FnMut(&ResolveProgress),
+{
+    let http = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(15))
+        .timeout(Duration::from_secs(90))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_FETCHES));
+    let registry = registry.trim_end_matches('/').to_string();
+
     // required 语义强于 optional：同一包版本先在 optional 子树中访问，
     // 后续又作为 required 依赖出现时，会升级上下文并重新处理。
-    let mut queue: VecDeque<QueueItem> = VecDeque::new();
+    let mut visited: HashMap<(String, String), VisitState> = HashMap::new();
+    // 同一 (name, range) 只需入队一次，规则同 visited。
+    let mut seen_specs: HashMap<(String, String), VisitState> = HashMap::new();
+    let mut packuments: HashMap<String, Result<Arc<Packument>, String>> = HashMap::new();
+    let mut result: Vec<ResolvedDep> = Vec::new();
+    let mut progress = ResolveProgress {
+        resolved: 0,
+        fetched: 0,
+        failed: 0,
+        in_flight: 0,
+        depth: 0,
+        current: None,
+        waiting: Vec::new(),
+    };
 
-    // Cache: package name -> all available versions
-    let mut versions_cache: HashMap<String, Vec<String>> = HashMap::new();
-
-    for (name, version) in packages {
-        queue.push_back(QueueItem {
+    let mut frontier: Vec<QueueItem> = packages
+        .into_iter()
+        .map(|(name, version)| QueueItem {
             name,
-            version,
+            range: version,
             optional_ctx: false,
-        });
-    }
+        })
+        .collect();
 
-    while let Some(QueueItem {
-        name,
-        version,
-        optional_ctx: opt_ctx,
-    }) = queue.pop_front()
-    {
-        let key = (name.clone(), version.clone());
-        let next_state = VisitState::from_context(opt_ctx);
-        match visited.get(&key).copied() {
-            Some(VisitState::Required) => continue,
-            Some(VisitState::Optional) if next_state == VisitState::Optional => continue,
-            Some(VisitState::Optional) => {
-                // required 语义强于 optional；同一包版本后续以 required 身份触达时
-                // 需要重新处理，以便 required 子依赖失败仍能正确报错。
-                visited.insert(key.clone(), VisitState::Required);
-            }
-            None => {
-                visited.insert(key.clone(), next_state);
-                result.push(ResolvedDep {
-                    package_name: name.clone(),
-                    version: version.clone(),
+    while !frontier.is_empty() {
+        progress.depth += 1;
+
+        let mut missing: HashSet<String> = frontier
+            .iter()
+            .filter(|item| !packuments.contains_key(&item.name))
+            .map(|item| item.name.clone())
+            .collect();
+        if !missing.is_empty() {
+            let mut set = JoinSet::new();
+            for name in missing.iter().cloned() {
+                let http = http.clone();
+                let sem = semaphore.clone();
+                let registry = registry.clone();
+                set.spawn(async move {
+                    let res = fetch_packument(&http, &sem, &registry, &name).await;
+                    (name, res)
                 });
+            }
+            progress.in_flight = missing.len();
+            progress.waiting = missing.iter().take(3).cloned().collect();
+            on_progress(&progress);
+
+            while let Some(joined) = set.join_next().await {
+                let (name, res) = joined.map_err(|e| e.to_string())?;
+                missing.remove(&name);
+                progress.fetched += 1;
+                if res.is_err() {
+                    progress.failed += 1;
+                }
+                progress.in_flight = missing.len();
+                progress.waiting = missing.iter().take(3).cloned().collect();
+                progress.current = Some(name.clone());
+                packuments.insert(name, res.map(Arc::new));
+                on_progress(&progress);
             }
         }
 
-        let deps =
-            match fetch_version_dependencies(&http, &semaphore, registry, &name, &version).await {
-                Ok(d) => d,
-                // optional 子树内的元数据拉取失败：跳过该子树，不中断整体
-                Err(e) => {
+        let mut next: Vec<QueueItem> = Vec::new();
+        for QueueItem {
+            name,
+            range,
+            optional_ctx: opt_ctx,
+        } in frontier.drain(..)
+        {
+            let packument = match packuments.get(&name) {
+                Some(Ok(p)) => p.clone(),
+                // 可选上下文内拉取失败时跳过；必需依赖仍报错，
+                // 避免静默产出不完整缓存集
+                Some(Err(e)) => {
                     if opt_ctx {
                         continue;
                     }
-                    return Err(e);
+                    return Err(e.clone());
                 }
+                None => continue,
+            };
+            let Some(version) = packument.resolve(&range) else {
+                continue;
             };
 
-        for DepSpec {
-            name: dep_name,
-            range: range_str,
-            optional: is_optional,
-        } in deps
-        {
-            // 一旦进入 optional 子树即保持 best-effort
-            let child_opt = opt_ctx || is_optional;
-            let all_versions = match versions_cache.get(&dep_name) {
-                Some(v) => v.clone(),
+            let key = (name.clone(), version.clone());
+            let next_state = VisitState::from_context(opt_ctx);
+            match visited.get(&key).copied() {
+                Some(VisitState::Required) => continue,
+                Some(VisitState::Optional) if next_state == VisitState::Optional => continue,
+                Some(VisitState::Optional) => {
+                    visited.insert(key, VisitState::Required);
+                }
                 None => {
-                    let v = match fetch_all_versions(&http, &semaphore, registry, &dep_name).await {
-                        Ok(v) => v,
-                        // 可选上下文内拉取失败时跳过；必需依赖仍报错，
-                        // 避免静默产出不完整缓存集
-                        Err(e) => {
-                            if child_opt {
-                                continue;
-                            }
-                            return Err(e);
-                        }
-                    };
-                    versions_cache.insert(dep_name.clone(), v.clone());
-                    v
+                    visited.insert(key, next_state);
+                    result.push(ResolvedDep {
+                        package_name: name.clone(),
+                        version: version.clone(),
+                    });
                 }
-            };
+            }
 
-            if let Some(resolved) = resolve_version(&range_str, &all_versions) {
-                queue.push_back(QueueItem {
-                    name: dep_name,
-                    version: resolved,
+            let Some(manifest) = packument.manifests.get(&version) else {
+                continue;
+            };
+            for DepSpec {
+                name: dep_name,
+                range: dep_range,
+                optional: is_optional,
+            } in extract_deps(manifest)
+            {
+                // 一旦进入 optional 子树即保持 best-effort
+                let child_opt = opt_ctx || is_optional;
+                let child_state = VisitState::from_context(child_opt);
+                let spec_key = (dep_name, dep_range);
+                match seen_specs.get(&spec_key).copied() {
+                    Some(VisitState::Required) => continue,
+                    Some(VisitState::Optional) if child_state == VisitState::Optional => continue,
+                    _ => {
+                        seen_specs.insert(spec_key.clone(), child_state);
+                    }
+                }
+                next.push(QueueItem {
+                    name: spec_key.0,
+                    range: spec_key.1,
                     optional_ctx: child_opt,
                 });
             }
         }
+
+        progress.resolved = result.len();
+        progress.in_flight = 0;
+        progress.waiting.clear();
+        on_progress(&progress);
+        frontier = next;
     }
 
     Ok(result)
@@ -175,96 +313,68 @@ fn extract_deps(body: &serde_json::Value) -> Vec<DepSpec> {
         .collect()
 }
 
-async fn fetch_version_dependencies(
+async fn fetch_packument(
     http: &reqwest::Client,
     sem: &Arc<Semaphore>,
     registry: &str,
     name: &str,
-    version: &str,
-) -> Result<Vec<DepSpec>, String> {
+) -> Result<Packument, String> {
     let _permit = sem.acquire().await.map_err(|e| e.to_string())?;
-    let url = format!("{}/{}/{}", registry.trim_end_matches('/'), name, version);
-    let resp = http
-        .get(&url)
-        .send()
-        .await
-        .map_err(|e| format!("获取 {}@{} 元数据失败: {}", name, version, e))?;
+    // scoped 包名中的 '/' 需编码，与 npm 客户端一致
+    let url = format!("{}/{}", registry, name.replace('/', "%2f"));
 
-    if !resp.status().is_success() {
-        return Err(format!(
-            "获取 {}@{} 元数据失败 (HTTP {})",
-            name,
-            version,
-            resp.status()
-        ));
+    let mut attempt = 0;
+    loop {
+        attempt += 1;
+        let retryable_err = match http
+            .get(&url)
+            .header("accept", ABBREVIATED_ACCEPT)
+            .send()
+            .await
+        {
+            Ok(resp) if resp.status().is_success() => {
+                let body: serde_json::Value = resp
+                    .json()
+                    .await
+                    .map_err(|e| format!("解析 {} 元数据失败: {}", name, e))?;
+                return Ok(Packument::from_json(body));
+            }
+            Ok(resp) => {
+                let status = resp.status();
+                let msg = format!("获取 {} 元数据失败 (HTTP {})", name, status);
+                if !matches!(status.as_u16(), 429 | 502 | 503 | 504) {
+                    return Err(msg);
+                }
+                msg
+            }
+            Err(e) => {
+                let reason = if e.is_timeout() {
+                    "请求超时".to_string()
+                } else {
+                    e.to_string()
+                };
+                format!("获取 {} 元数据失败: {}", name, reason)
+            }
+        };
+        if attempt >= MAX_FETCH_ATTEMPTS {
+            return Err(format!("{}（已重试 {} 次）", retryable_err, attempt - 1));
+        }
+        tokio::time::sleep(Duration::from_millis(500 * attempt as u64)).await;
     }
-
-    let body: serde_json::Value = resp
-        .json()
-        .await
-        .map_err(|e| format!("解析 {}@{} 元数据失败: {}", name, version, e))?;
-
-    Ok(extract_deps(&body))
-}
-
-async fn fetch_all_versions(
-    http: &reqwest::Client,
-    sem: &Arc<Semaphore>,
-    registry: &str,
-    name: &str,
-) -> Result<Vec<String>, String> {
-    let _permit = sem.acquire().await.map_err(|e| e.to_string())?;
-    let url = format!("{}/{}", registry.trim_end_matches('/'), name);
-    let resp = http
-        .get(&url)
-        .header("accept", "application/json")
-        .send()
-        .await
-        .map_err(|e| format!("获取 {} 版本列表失败: {}", name, e))?;
-
-    if !resp.status().is_success() {
-        return Err(format!(
-            "获取 {} 版本列表失败 (HTTP {})",
-            name,
-            resp.status()
-        ));
-    }
-
-    let body: serde_json::Value = resp
-        .json()
-        .await
-        .map_err(|e| format!("解析 {} 版本列表失败: {}", name, e))?;
-
-    let versions = body["versions"]
-        .as_object()
-        .map(|v| v.keys().cloned().collect())
-        .unwrap_or_default();
-
-    Ok(versions)
 }
 
 fn resolve_version(range_str: &str, available: &[String]) -> Option<String> {
-    let range = match node_semver::Range::parse(range_str) {
-        Ok(r) => r,
-        Err(_) => return available.last().cloned(),
-    };
+    if available.iter().any(|v| v == range_str) {
+        return Some(range_str.to_string());
+    }
+    let range = node_semver::Range::parse(range_str).ok()?;
 
-    let mut matching: Vec<&String> = available
+    available
         .iter()
-        .filter(|v| {
-            node_semver::Version::parse(v)
-                .map(|ver| range.satisfies(&ver))
-                .unwrap_or(false)
-        })
-        .collect();
-
-    matching.sort_by(|a, b| {
-        let va = node_semver::Version::parse(a).unwrap();
-        let vb = node_semver::Version::parse(b).unwrap();
-        va.cmp(&vb)
-    });
-
-    matching.last().map(|v| (*v).clone())
+        .filter_map(|v| node_semver::Version::parse(v).ok().map(|ver| (ver, v)))
+        .filter(|(ver, _)| range.satisfies(ver))
+        .max_by(|(a, _), (b, _)| a.cmp(b))
+        .map(|(_, v)| v.clone())
 }
 
 #[cfg(test)]
@@ -346,35 +456,52 @@ mod tests {
         assert!(!entry.optional, "同名时不应被 peer 降级为可选");
     }
 
+    #[test]
+    fn resolve_version_picks_highest_match() {
+        let available: Vec<String> = ["1.0.0", "1.2.0", "1.10.0", "2.0.0"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(resolve_version("^1.0.0", &available).as_deref(), Some("1.10.0"));
+        assert_eq!(resolve_version("2.0.0", &available).as_deref(), Some("2.0.0"));
+        assert_eq!(resolve_version("^3.0.0", &available), None);
+    }
+
     mod resolve_all_failure_tolerance {
         use super::*;
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
-        async fn mock_version_list(server: &MockServer, name: &str) {
+        /// 挂载一个只有 1.0.0 版本的精简 packument，`manifest` 为该版本的依赖声明。
+        async fn mock_packument(server: &MockServer, name: &str, manifest: serde_json::Value) {
             Mock::given(method("GET"))
-                .and(path(format!("/{}", name)))
-                .respond_with(
-                    ResponseTemplate::new(200)
-                        .set_body_json(json!({ "versions": { "1.0.0": {} } })),
-                )
+                .and(path(format!("/{}", name.replace('/', "%2f"))))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "name": name,
+                    "dist-tags": { "latest": "1.0.0" },
+                    "versions": { "1.0.0": manifest }
+                })))
                 .mount(server)
                 .await;
         }
 
-        async fn mock_meta(server: &MockServer, name: &str, body: serde_json::Value) {
+        async fn mock_failure(server: &MockServer, name: &str) {
             Mock::given(method("GET"))
-                .and(path(format!("/{}/1.0.0", name)))
-                .respond_with(ResponseTemplate::new(200).set_body_json(body))
+                .and(path(format!("/{}", name)))
+                .respond_with(ResponseTemplate::new(500))
                 .mount(server)
                 .await;
+        }
+
+        fn names(res: Vec<ResolvedDep>) -> Vec<String> {
+            res.into_iter().map(|d| d.package_name).collect()
         }
 
         #[tokio::test]
         async fn optional_subtree_metadata_failure_does_not_abort() {
             let server = MockServer::start().await;
             // root a 依赖必需 b 与可选 opt
-            mock_meta(
+            mock_packument(
                 &server,
                 "a",
                 json!({
@@ -383,38 +510,22 @@ mod tests {
                 }),
             )
             .await;
-            mock_version_list(&server, "b").await;
-            mock_version_list(&server, "opt").await;
-            mock_meta(&server, "b", json!({})).await;
-            // opt 的版本元数据返回 500 —— 属可选上下文，应跳过而非整体失败
-            Mock::given(method("GET"))
-                .and(path("/opt/1.0.0"))
-                .respond_with(ResponseTemplate::new(500))
-                .mount(&server)
-                .await;
+            mock_packument(&server, "b", json!({})).await;
+            // opt 的元数据返回 500 —— 属可选上下文，应跳过而非整体失败
+            mock_failure(&server, "opt").await;
 
             let res = resolve_all(vec![("a".into(), "1.0.0".into())], &server.uri()).await;
-            let names: Vec<String> = res
-                .expect("optional 子树失败不应中断整体解析")
-                .into_iter()
-                .map(|d| d.package_name)
-                .collect();
+            let names = names(res.expect("optional 子树失败不应中断整体解析"));
             assert!(names.contains(&"a".to_string()));
             assert!(names.contains(&"b".to_string()), "必需依赖应被解析");
-            assert!(names.contains(&"opt".to_string()), "opt 仍应进入缓存集");
         }
 
         #[tokio::test]
         async fn required_metadata_failure_still_errors() {
             let server = MockServer::start().await;
-            mock_meta(&server, "a", json!({ "dependencies": { "b": "1.0.0" } })).await;
-            mock_version_list(&server, "b").await;
+            mock_packument(&server, "a", json!({ "dependencies": { "b": "1.0.0" } })).await;
             // 必需依赖 b 的元数据失败 —— 必须报错，避免静默残缺缓存集
-            Mock::given(method("GET"))
-                .and(path("/b/1.0.0"))
-                .respond_with(ResponseTemplate::new(500))
-                .mount(&server)
-                .await;
+            mock_failure(&server, "b").await;
 
             let res = resolve_all(vec![("a".into(), "1.0.0".into())], &server.uri()).await;
             assert!(res.is_err(), "必需依赖元数据失败应返回错误");
@@ -423,27 +534,21 @@ mod tests {
         #[tokio::test]
         async fn required_visit_after_optional_failure_still_errors() {
             let server = MockServer::start().await;
-            mock_meta(
+            mock_packument(
                 &server,
                 "opt-parent",
                 json!({ "optionalDependencies": { "shared": "1.0.0" } }),
             )
             .await;
-            mock_meta(
+            mock_packument(
                 &server,
                 "req-parent",
                 json!({ "dependencies": { "shared": "1.0.0" } }),
             )
             .await;
-            mock_version_list(&server, "shared").await;
-
-            // shared 先从 optional 子树被访问时应被跳过；随后 required 子树再访问
-            // 同一 shared@1.0.0 时必须升级为必需上下文并报错。
-            Mock::given(method("GET"))
-                .and(path("/shared/1.0.0"))
-                .respond_with(ResponseTemplate::new(500))
-                .mount(&server)
-                .await;
+            // shared 从 optional 子树访问时应被跳过；同一 shared 又被 required
+            // 子树触达时必须按必需上下文报错。
+            mock_failure(&server, "shared").await;
 
             let res = resolve_all(
                 vec![
@@ -463,28 +568,19 @@ mod tests {
         async fn peer_dependency_is_resolved_and_included() {
             let server = MockServer::start().await;
             // root a 声明 peer react —— npm 7+ 会自动安装，应进入缓存集
-            mock_meta(
-                &server,
-                "a",
-                json!({ "peerDependencies": { "react": "1.0.0" } }),
-            )
-            .await;
-            mock_version_list(&server, "react").await;
-            mock_meta(&server, "react", json!({})).await;
+            mock_packument(&server, "a", json!({ "peerDependencies": { "react": "1.0.0" } }))
+                .await;
+            mock_packument(&server, "react", json!({})).await;
 
             let res = resolve_all(vec![("a".into(), "1.0.0".into())], &server.uri()).await;
-            let names: Vec<String> = res
-                .expect("peer 正常时应整体成功")
-                .into_iter()
-                .map(|d| d.package_name)
-                .collect();
+            let names = names(res.expect("peer 正常时应整体成功"));
             assert!(names.contains(&"react".to_string()), "peer 依赖应被解析并纳入");
         }
 
         #[tokio::test]
         async fn peer_dependency_failure_does_not_abort() {
             let server = MockServer::start().await;
-            mock_meta(
+            mock_packument(
                 &server,
                 "a",
                 json!({
@@ -493,24 +589,65 @@ mod tests {
                 }),
             )
             .await;
-            mock_version_list(&server, "b").await;
-            mock_version_list(&server, "p").await;
-            mock_meta(&server, "b", json!({})).await;
-            // peer p 的版本元数据 500 —— peer 按 optional 处理，跳过不中断
+            mock_packument(&server, "b", json!({})).await;
+            // peer p 的元数据 500 —— peer 按 optional 处理，跳过不中断
+            mock_failure(&server, "p").await;
+
+            let res = resolve_all(vec![("a".into(), "1.0.0".into())], &server.uri()).await;
+            let names = names(res.expect("peer 子树失败不应中断整体解析"));
+            assert!(names.contains(&"a".to_string()));
+            assert!(names.contains(&"b".to_string()), "必需依赖应被解析");
+        }
+
+        #[tokio::test]
+        async fn scoped_package_and_dist_tag_range_are_resolved() {
+            let server = MockServer::start().await;
+            mock_packument(
+                &server,
+                "@scope/root",
+                json!({ "dependencies": { "@scope/child": "latest" } }),
+            )
+            .await;
+            mock_packument(&server, "@scope/child", json!({})).await;
+
+            let res = resolve_all(vec![("@scope/root".into(), "1.0.0".into())], &server.uri())
+                .await
+                .expect("scoped 包与 dist-tag 范围应可解析");
+            let child = res
+                .iter()
+                .find(|d| d.package_name == "@scope/child")
+                .expect("dist-tag 依赖应被纳入");
+            assert_eq!(child.version, "1.0.0");
+        }
+
+        #[tokio::test]
+        async fn shared_packument_is_fetched_once_and_progress_reported() {
+            let server = MockServer::start().await;
+            mock_packument(&server, "a", json!({ "dependencies": { "shared": "^1.0.0" } })).await;
+            mock_packument(&server, "b", json!({ "dependencies": { "shared": "1.0.0" } })).await;
             Mock::given(method("GET"))
-                .and(path("/p/1.0.0"))
-                .respond_with(ResponseTemplate::new(500))
+                .and(path("/shared"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "dist-tags": { "latest": "1.0.0" },
+                    "versions": { "1.0.0": {} }
+                })))
+                .expect(1)
                 .mount(&server)
                 .await;
 
-            let res = resolve_all(vec![("a".into(), "1.0.0".into())], &server.uri()).await;
-            let names: Vec<String> = res
-                .expect("peer 子树失败不应中断整体解析")
-                .into_iter()
-                .map(|d| d.package_name)
-                .collect();
-            assert!(names.contains(&"a".to_string()));
-            assert!(names.contains(&"b".to_string()), "必需依赖应被解析");
+            let mut last: Option<ResolveProgress> = None;
+            let res = resolve_all_with_progress(
+                vec![("a".into(), "1.0.0".into()), ("b".into(), "1.0.0".into())],
+                &server.uri(),
+                |p| last = Some(p.clone()),
+            )
+            .await
+            .expect("应解析成功");
+            assert_eq!(res.len(), 3);
+            let last = last.expect("应上报进度");
+            assert_eq!(last.resolved, 3);
+            assert_eq!(last.fetched, 3);
+            assert_eq!(last.in_flight, 0);
         }
     }
 }
