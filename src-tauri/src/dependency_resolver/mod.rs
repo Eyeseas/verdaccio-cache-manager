@@ -1,6 +1,8 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
+
+use crate::version_picker::{metas_from_versions, pick_version, VersionMeta};
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 
@@ -74,7 +76,7 @@ struct QueueItem {
 
 /// 单个包名的元数据：一次请求同时得到版本列表、dist-tags 与各版本依赖。
 struct Packument {
-    versions: Vec<String>,
+    metas: HashMap<String, VersionMeta>,
     dist_tags: HashMap<String, String>,
     manifests: serde_json::Map<String, serde_json::Value>,
 }
@@ -94,20 +96,19 @@ impl Packument {
             })
             .unwrap_or_default();
         Self {
-            versions: manifests.keys().cloned().collect(),
+            metas: metas_from_versions(&manifests),
             dist_tags,
             manifests,
         }
     }
 
-    fn resolve(&self, range: &str) -> Option<String> {
-        if let Some(v) = self.dist_tags.get(range) {
-            return Some(v.clone());
-        }
-        resolve_version(range, &self.versions).or_else(|| match node_semver::Range::parse(range) {
-            // 无法解析的范围（git/url/alias 等）退回 latest
-            Err(_) => self.dist_tags.get("latest").cloned(),
-            Ok(_) => None,
+    fn resolve(&self, range: &str, node: Option<&node_semver::Version>) -> Option<String> {
+        pick_version(range, &self.metas, &self.dist_tags, node).or_else(|| {
+            match node_semver::Range::parse(range) {
+                // 无法解析的范围（git/url/alias 等）退回 latest
+                Err(_) => self.dist_tags.get("latest").cloned(),
+                Ok(_) => None,
+            }
         })
     }
 }
@@ -116,14 +117,16 @@ pub async fn resolve_all(
     packages: Vec<(String, String)>,
     registry: &str,
 ) -> Result<Vec<ResolvedDep>, String> {
-    resolve_all_with_progress(packages, registry, |_| {}).await
+    resolve_all_with_progress(packages, registry, None, |_| {}).await
 }
 
 /// 按 BFS 层级解析完整依赖闭包：每层先并发拉取本层所有未缓存包名的
-/// packument，再在内存中完成版本匹配与下一层展开。
+/// packument，再在内存中完成版本匹配与下一层展开。`node` 为目标 Node 版本，
+/// 用于按 npm 规则优先选择 engines 兼容的版本。
 pub async fn resolve_all_with_progress<F>(
     packages: Vec<(String, String)>,
     registry: &str,
+    node: Option<node_semver::Version>,
     mut on_progress: F,
 ) -> Result<Vec<ResolvedDep>, String>
 where
@@ -220,7 +223,7 @@ where
                 }
                 None => continue,
             };
-            let Some(version) = packument.resolve(&range) else {
+            let Some(version) = packument.resolve(&range, node.as_ref()) else {
                 continue;
             };
 
@@ -363,20 +366,6 @@ async fn fetch_packument(
     }
 }
 
-fn resolve_version(range_str: &str, available: &[String]) -> Option<String> {
-    if available.iter().any(|v| v == range_str) {
-        return Some(range_str.to_string());
-    }
-    let range = node_semver::Range::parse(range_str).ok()?;
-
-    available
-        .iter()
-        .filter_map(|v| node_semver::Version::parse(v).ok().map(|ver| (ver, v)))
-        .filter(|(ver, _)| range.satisfies(ver))
-        .max_by(|(a, _), (b, _)| a.cmp(b))
-        .map(|(_, v)| v.clone())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -454,17 +443,6 @@ mod tests {
         let entry = find(&deps, "shared").unwrap();
         assert_eq!(entry.range, "^2.0.0", "同名时应保留 dependencies 的范围");
         assert!(!entry.optional, "同名时不应被 peer 降级为可选");
-    }
-
-    #[test]
-    fn resolve_version_picks_highest_match() {
-        let available: Vec<String> = ["1.0.0", "1.2.0", "1.10.0", "2.0.0"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-        assert_eq!(resolve_version("^1.0.0", &available).as_deref(), Some("1.10.0"));
-        assert_eq!(resolve_version("2.0.0", &available).as_deref(), Some("2.0.0"));
-        assert_eq!(resolve_version("^3.0.0", &available), None);
     }
 
     mod resolve_all_failure_tolerance {
@@ -639,6 +617,7 @@ mod tests {
             let res = resolve_all_with_progress(
                 vec![("a".into(), "1.0.0".into()), ("b".into(), "1.0.0".into())],
                 &server.uri(),
+                None,
                 |p| last = Some(p.clone()),
             )
             .await
@@ -648,6 +627,44 @@ mod tests {
             assert_eq!(last.resolved, 3);
             assert_eq!(last.fetched, 3);
             assert_eq!(last.in_flight, 0);
+        }
+
+        #[tokio::test]
+        async fn transitive_range_respects_target_node_engines() {
+            let server = MockServer::start().await;
+            mock_packument(&server, "a", json!({ "dependencies": { "dep": "^1.0.0" } })).await;
+            Mock::given(method("GET"))
+                .and(path("/dep"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "dist-tags": { "latest": "1.2.0" },
+                    "versions": {
+                        "1.1.0": { "engines": { "node": ">=16" } },
+                        "1.2.0": { "engines": { "node": ">=20" } }
+                    }
+                })))
+                .mount(&server)
+                .await;
+
+            let dep_version = |res: Vec<ResolvedDep>| {
+                res.into_iter()
+                    .find(|d| d.package_name == "dep")
+                    .map(|d| d.version)
+            };
+            let node18 = node_semver::Version::parse("18.20.4").unwrap();
+            let res = resolve_all_with_progress(
+                vec![("a".into(), "1.0.0".into())],
+                &server.uri(),
+                Some(node18),
+                |_| {},
+            )
+            .await
+            .expect("应解析成功");
+            assert_eq!(dep_version(res).as_deref(), Some("1.1.0"));
+
+            let res = resolve_all(vec![("a".into(), "1.0.0".into())], &server.uri())
+                .await
+                .expect("应解析成功");
+            assert_eq!(dep_version(res).as_deref(), Some("1.2.0"));
         }
     }
 }

@@ -2,12 +2,14 @@ pub mod cache_db;
 pub mod config;
 pub mod dependency_resolver;
 pub mod local_scanner;
+pub mod node_env;
 pub mod package_downgrade;
 pub mod parser;
 pub mod registry_client;
 pub mod storage_scanner;
 pub mod sync_engine;
 pub mod task_engine;
+pub mod version_picker;
 
 use cache_db::{CacheDb, CachedStatus, SyncInfo, TaskBatchSummary, TaskItemRecord};
 use config::AppConfig;
@@ -18,7 +20,6 @@ use parser::ParsedDependency;
 use registry_client::SearchResult;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use std::process::Command;
 use std::sync::Arc;
 use sync_engine::SyncEngine;
 use tauri::Manager;
@@ -58,8 +59,9 @@ fn get_config(app_handle: tauri::AppHandle) -> AppConfig {
 fn save_config(
     app_handle: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
-    config: AppConfig,
-) -> Result<(), String> {
+    mut config: AppConfig,
+) -> Result<AppConfig, String> {
+    config.target_node_version = node_env::normalize_target_node_version(config.target_node_version)?;
     let old_config = config::load_config(&app_handle);
     config::save_config(&app_handle, &config)?;
 
@@ -79,7 +81,7 @@ fn save_config(
         });
     }
 
-    Ok(())
+    Ok(config)
 }
 
 #[tauri::command]
@@ -88,25 +90,22 @@ async fn test_connection(registry_url: String) -> Result<(), String> {
     client.test_connection().await
 }
 
-fn normalize_node_version_stdout(stdout: &[u8]) -> Result<String, String> {
-    let version = String::from_utf8_lossy(stdout).trim().to_string();
-    if version.is_empty() {
-        Err("node -v 未返回版本".to_string())
-    } else {
-        Ok(version)
-    }
+/// 解析依赖时采用的 Node 版本：设置中指定的目标版本，否则为本机版本。
+/// 本机检测首次需启动登录 shell 读取 PATH，放到阻塞线程执行。
+#[tauri::command]
+async fn get_node_version(app_handle: tauri::AppHandle) -> Result<String, String> {
+    let config = config::load_config(&app_handle);
+    tauri::async_runtime::spawn_blocking(move || node_env::effective_node_version_label(&config))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
-#[tauri::command]
-fn get_node_version() -> Result<String, String> {
-    let output = Command::new("node")
-        .arg("-v")
-        .output()
-        .map_err(|e| format!("无法执行 node -v: {}", e))?;
-    if !output.status.success() {
-        return Err("node -v 执行失败".to_string());
-    }
-    normalize_node_version_stdout(&output.stdout)
+async fn resolve_node_version(app_handle: &tauri::AppHandle) -> Option<node_semver::Version> {
+    let config = config::load_config(app_handle);
+    tauri::async_runtime::spawn_blocking(move || node_env::effective_node_version(&config))
+        .await
+        .ok()
+        .flatten()
 }
 
 #[tauri::command]
@@ -476,6 +475,7 @@ async fn resolve_package_versions(
     let versions_cache: Arc<Mutex<HashMap<String, Arc<parser::PackageVersions>>>> =
         Arc::new(Mutex::new(HashMap::new()));
     let db = state.cache_db.clone();
+    let node = resolve_node_version(&app_handle).await;
 
     let mut handles = Vec::with_capacity(packages.len());
     for pkg in packages {
@@ -485,13 +485,14 @@ async fn resolve_package_versions(
         let app = app_handle.clone();
         let db = db.clone();
         let request_id = request_id.clone();
+        let node = node.clone();
 
         handles.push(tokio::spawn(async move {
             let name = pkg.package_name.clone();
             let raw_range = pkg.version.clone();
 
             let (resolved, error) =
-                match parser::resolve_single(&http, &sem, &cache, &name, &raw_range).await {
+                match parser::resolve_single(&http, &sem, &cache, &name, &raw_range, node.as_ref()).await {
                     Ok(v) => (Some(v), None),
                     Err(e) => (None, Some(e)),
                 };
@@ -548,10 +549,12 @@ async fn resolve_dependencies(
         .into_iter()
         .map(|p| (p.package_name, p.version))
         .collect();
+    let node = resolve_node_version(&app_handle).await;
     let mut last_emit: Option<std::time::Instant> = None;
     dependency_resolver::resolve_all_with_progress(
         initial,
         "https://registry.npmjs.org",
+        node,
         |progress| {
             // 节流到 ~10 次/秒；层结束（in_flight 为 0）时总是推送
             let due = last_emit.map_or(true, |t| t.elapsed().as_millis() >= 100);
@@ -963,18 +966,6 @@ mod plugin_export_tests {
         assert!(json.contains("\"batch\""));
         assert!(json.contains("\"items\""));
         assert!(json.contains("\"left-pad\""));
-    }
-
-    #[test]
-    fn normalize_node_version_stdout_trims_version() {
-        let version = normalize_node_version_stdout(b"v22.12.0\n").unwrap();
-        assert_eq!(version, "v22.12.0");
-    }
-
-    #[test]
-    fn normalize_node_version_stdout_rejects_empty_output() {
-        let err = normalize_node_version_stdout(b" \n").unwrap_err();
-        assert!(err.contains("node -v 未返回版本"));
     }
 }
 

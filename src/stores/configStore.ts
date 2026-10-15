@@ -7,6 +7,7 @@ export interface AppConfig {
   retry_count: number;
   timeout_secs: number;
   verdaccio_storage_path: string | null;
+  target_node_version: string | null;
 }
 
 interface ConfigStore {
@@ -24,6 +25,7 @@ export const useConfigStore = create<ConfigStore>((set) => ({
     retry_count: 3,
     timeout_secs: 60,
     verdaccio_storage_path: null,
+    target_node_version: null,
   },
   loading: false,
 
@@ -38,8 +40,8 @@ export const useConfigStore = create<ConfigStore>((set) => ({
   },
 
   saveConfig: async (config: AppConfig) => {
-    await invoke("save_config", { config });
-    set({ config });
+    const saved = await invoke<AppConfig>("save_config", { config });
+    set({ config: saved });
   },
 
   testConnection: async (url: string) => {

@@ -783,7 +783,10 @@ export function ImportPage() {
                 </Badge>
               )}
               {importSource === "command" && (
-                <Badge variant="outline">
+                <Badge
+                  variant="outline"
+                  title="解析依赖时按此 Node 版本匹配 engines.node，可在设置中指定目标版本"
+                >
                   {nodeVersionChecked && nodeVersion
                     ? `Node ${nodeVersion}`
                     : nodeVersionChecked

@@ -147,7 +147,8 @@ export function SettingsPage() {
     form.concurrency !== config.concurrency ||
     form.retry_count !== config.retry_count ||
     form.timeout_secs !== config.timeout_secs ||
-    form.verdaccio_storage_path !== config.verdaccio_storage_path;
+    form.verdaccio_storage_path !== config.verdaccio_storage_path ||
+    form.target_node_version !== config.target_node_version;
 
   return (
     <div className="h-full overflow-y-auto p-6">
@@ -292,10 +293,10 @@ export function SettingsPage() {
               任务参数
             </CardTitle>
             <CardDescription>
-              控制缓存下载任务的并发、重试和超时行为
+              控制缓存下载任务的并发、重试和超时行为，以及依赖解析的目标环境
             </CardDescription>
           </CardHeader>
-          <CardContent>
+          <CardContent className="space-y-4">
             <div className="grid grid-cols-3 gap-4">
               <div className="space-y-2">
                 <Label htmlFor="concurrency">并发数</Label>
@@ -339,6 +340,28 @@ export function SettingsPage() {
                 />
                 <p className="text-xs text-muted-foreground">10–300</p>
               </div>
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="target_node_version">
+                目标 Node 版本
+                <span className="ml-1.5 text-xs font-normal text-muted-foreground">
+                  可选
+                </span>
+              </Label>
+              <Input
+                id="target_node_version"
+                value={form.target_node_version ?? ""}
+                onChange={(e) =>
+                  setForm({
+                    ...form,
+                    target_node_version: e.target.value || null,
+                  })
+                }
+                placeholder="留空则使用本机 Node 版本，如 18.20.4"
+              />
+              <p className="text-xs text-muted-foreground">
+                解析依赖时按 npm 规则优先选择 engines.node 兼容该版本的包版本，应与实际从私服安装的客户端一致。
+              </p>
             </div>
           </CardContent>
           <CardFooter className="justify-between">

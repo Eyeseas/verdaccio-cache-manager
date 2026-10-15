@@ -4,6 +4,8 @@ use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::{Mutex, Semaphore};
 
+use crate::version_picker::{metas_from_versions, pick_version, VersionMeta};
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ParsedDependency {
     pub name: String,
@@ -394,6 +396,7 @@ pub async fn resolve_single(
     cache: &Arc<Mutex<HashMap<String, Arc<PackageVersions>>>>,
     name: &str,
     raw_range: &str,
+    node: Option<&node_semver::Version>,
 ) -> Result<String, String> {
     if let Some(v) = pinned_version(raw_range) {
         return Ok(v);
@@ -413,24 +416,25 @@ pub async fn resolve_single(
         }
     };
 
-    resolve_from_metadata(raw_range, &pkg)
+    resolve_from_metadata(raw_range, &pkg, node)
 }
 
-/// 依据包元数据把 range 或 dist-tag 解析为具体版本。
-pub fn resolve_from_metadata(raw_range: &str, pkg: &PackageVersions) -> Result<String, String> {
-    // 合法 semver range（含 "*"、"^1"、"1.x" 等）走 range 匹配
+/// 依据包元数据把 range 或 dist-tag 解析为具体版本，规则同 npm 客户端
+/// （见 `version_picker::pick_version`）。
+pub fn resolve_from_metadata(
+    raw_range: &str,
+    pkg: &PackageVersions,
+    node: Option<&node_semver::Version>,
+) -> Result<String, String> {
+    if let Some(v) = pick_version(raw_range, &pkg.versions, &pkg.dist_tags, node) {
+        return Ok(v);
+    }
     if node_semver::Range::parse(raw_range).is_ok() {
-        return resolve_max_satisfying(raw_range, &pkg.versions)
-            .ok_or_else(|| format!("没有满足范围 {} 的已发布版本", raw_range));
+        return Err(format!("没有满足范围 {} 的已发布版本", raw_range));
     }
-
-    // 非 range 视为 dist-tag（latest / next / beta …）
-    if let Some(v) = pkg.dist_tags.get(raw_range) {
-        return Ok(v.clone());
-    }
-    // registry 元数据缺 dist-tags 时，latest 兜底取最大版本
+    // registry 元数据缺 dist-tags 时，latest 兜底按 `*` 选取
     if raw_range == "latest" {
-        if let Some(v) = resolve_max_satisfying("*", &pkg.versions) {
+        if let Some(v) = pick_version("*", &pkg.versions, &pkg.dist_tags, node) {
             return Ok(v);
         }
     }
@@ -452,7 +456,7 @@ pub async fn resolve_version_ranges(deps: Vec<ParsedDependency>) -> Vec<ParsedDe
         let sem = sem.clone();
         let cache = versions_cache.clone();
         handles.push(tokio::spawn(async move {
-            let resolved = resolve_single(&http, &sem, &cache, &dep.name, &dep.version)
+            let resolved = resolve_single(&http, &sem, &cache, &dep.name, &dep.version, None)
                 .await
                 .ok()?;
             Some(ParsedDependency {
@@ -475,7 +479,7 @@ pub async fn resolve_version_ranges(deps: Vec<ParsedDependency>) -> Vec<ParsedDe
 /// npm registry 上一个包的版本清单及 dist-tags（latest / next / beta …）。
 #[derive(Debug, Clone)]
 pub struct PackageVersions {
-    pub versions: Vec<String>,
+    pub versions: HashMap<String, VersionMeta>,
     pub dist_tags: HashMap<String, String>,
 }
 
@@ -504,7 +508,7 @@ pub async fn fetch_versions(
         .map_err(|e| format!("registry 响应解析失败: {}", e))?;
     let versions = body["versions"]
         .as_object()
-        .map(|v| v.keys().cloned().collect())
+        .map(metas_from_versions)
         .unwrap_or_default();
     let dist_tags = body["dist-tags"]
         .as_object()
@@ -517,24 +521,16 @@ pub async fn fetch_versions(
     Ok(PackageVersions { versions, dist_tags })
 }
 
-pub fn resolve_max_satisfying(range_str: &str, available: &[String]) -> Option<String> {
-    let range = node_semver::Range::parse(range_str).ok()?;
-    let mut matching: Vec<node_semver::Version> = available
-        .iter()
-        .filter_map(|v| node_semver::Version::parse(v).ok())
-        .filter(|v| range.satisfies(v))
-        .collect();
-    matching.sort();
-    matching.last().map(|v| v.to_string())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn meta(versions: &[&str], tags: &[(&str, &str)]) -> PackageVersions {
         PackageVersions {
-            versions: versions.iter().map(|s| s.to_string()).collect(),
+            versions: versions
+                .iter()
+                .map(|s| (s.to_string(), VersionMeta::default()))
+                .collect(),
             dist_tags: tags
                 .iter()
                 .map(|(k, v)| (k.to_string(), v.to_string()))
@@ -545,38 +541,49 @@ mod tests {
     #[test]
     fn resolve_from_metadata_supports_latest_dist_tag() {
         let pkg = meta(&["1.0.0", "2.0.0", "3.0.0-beta.1"], &[("latest", "2.0.0")]);
-        assert_eq!(resolve_from_metadata("latest", &pkg).unwrap(), "2.0.0");
+        assert_eq!(resolve_from_metadata("latest", &pkg, None).unwrap(), "2.0.0");
     }
 
     #[test]
     fn resolve_from_metadata_supports_custom_dist_tags() {
         let pkg = meta(&["1.0.0", "3.0.0-beta.1"], &[("beta", "3.0.0-beta.1")]);
-        assert_eq!(resolve_from_metadata("beta", &pkg).unwrap(), "3.0.0-beta.1");
+        assert_eq!(resolve_from_metadata("beta", &pkg, None).unwrap(), "3.0.0-beta.1");
     }
 
     #[test]
     fn resolve_from_metadata_latest_falls_back_to_max_version() {
         let pkg = meta(&["1.0.0", "2.5.1"], &[]);
-        assert_eq!(resolve_from_metadata("latest", &pkg).unwrap(), "2.5.1");
+        assert_eq!(resolve_from_metadata("latest", &pkg, None).unwrap(), "2.5.1");
     }
 
     #[test]
     fn resolve_from_metadata_range_still_works() {
         let pkg = meta(&["1.0.0", "1.9.3", "2.0.0"], &[("latest", "2.0.0")]);
-        assert_eq!(resolve_from_metadata("^1.0.0", &pkg).unwrap(), "1.9.3");
+        assert_eq!(resolve_from_metadata("^1.0.0", &pkg, None).unwrap(), "1.9.3");
+    }
+
+    #[test]
+    fn resolve_from_metadata_respects_target_node_engines() {
+        let mut pkg = meta(&["1.0.0", "1.9.3"], &[("latest", "1.9.3")]);
+        pkg.versions.get_mut("1.9.3").unwrap().engines_node = Some(">=20".to_string());
+        let node18 = node_semver::Version::parse("18.20.4").unwrap();
+        assert_eq!(resolve_from_metadata("^1.0.0", &pkg, Some(&node18)).unwrap(), "1.0.0");
+        assert_eq!(resolve_from_metadata("^1.0.0", &pkg, None).unwrap(), "1.9.3");
+        // 显式 dist-tag 不受 engines 影响，与 npm 一致
+        assert_eq!(resolve_from_metadata("latest", &pkg, Some(&node18)).unwrap(), "1.9.3");
     }
 
     #[test]
     fn resolve_from_metadata_reports_unsatisfiable_range() {
         let pkg = meta(&["1.0.0"], &[("latest", "1.0.0")]);
-        let err = resolve_from_metadata("^9.0.0", &pkg).unwrap_err();
+        let err = resolve_from_metadata("^9.0.0", &pkg, None).unwrap_err();
         assert!(err.contains("^9.0.0"), "错误应包含原始 range: {err}");
     }
 
     #[test]
     fn resolve_from_metadata_reports_unknown_tag() {
         let pkg = meta(&["1.0.0"], &[("latest", "1.0.0")]);
-        let err = resolve_from_metadata("canary", &pkg).unwrap_err();
+        let err = resolve_from_metadata("canary", &pkg, None).unwrap_err();
         assert!(err.contains("canary"), "错误应包含未知 tag: {err}");
     }
 

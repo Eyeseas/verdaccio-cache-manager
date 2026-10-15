@@ -37,6 +37,7 @@ const {
     retry_count: 3,
     timeout_secs: 60,
     verdaccio_storage_path: null,
+    target_node_version: null,
   },
 }));
 

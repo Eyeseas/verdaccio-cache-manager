@@ -10,6 +10,9 @@ pub struct AppConfig {
     pub timeout_secs: u64,
     #[serde(default)]
     pub verdaccio_storage_path: Option<String>,
+    /// 解析依赖时用于匹配 `engines.node` 的目标 Node 版本；为空则使用本机版本。
+    #[serde(default)]
+    pub target_node_version: Option<String>,
 }
 
 impl Default for AppConfig {
@@ -20,6 +23,7 @@ impl Default for AppConfig {
             retry_count: 3,
             timeout_secs: 60,
             verdaccio_storage_path: None,
+            target_node_version: None,
         }
     }
 }
