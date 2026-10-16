@@ -1,6 +1,6 @@
 {
   "name": "verdaccio-cached-list",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Verdaccio middleware plugin that exposes cached packages (including proxy-cached) via GET /-/cached-packages",
   "keywords": [
     "verdaccio",

@@ -55,6 +55,14 @@ Returns a JSON array:
 
 - `versions` — all versions known to Verdaccio's cached manifest (the full upstream version list).
 - `cached_versions` — versions that actually have a `.tgz` on disk (the strict "cached" set).
+- `latest` — `dist-tags.latest`, falling back to the highest version when the tag is absent.
+- `dist_latest` — the raw `dist-tags.latest`, or `null` when absent (since 0.2.0).
+
+### Query parameters
+
+- `include_empty=1` — also return packages that have no `.tgz` on disk at all (metadata-only leftovers from uplinks). By default they are omitted. Since 0.2.0.
+
+Verdaccio Cache Manager uses `include_empty=1` and `dist_latest` for its remote storage health check, which finds versions listed in metadata without a tarball and stale `dist-tags.latest` values that break offline installs.
 
 ## How it works
 

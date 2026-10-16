@@ -14,7 +14,7 @@ class CachedListPlugin {
   register_middlewares(app) {
     const self = this;
 
-    app.get("/-/cached-packages", async function handler(_req, res) {
+    app.get("/-/cached-packages", async function handler(req, res) {
       try {
         if (!self.storagePath) {
           res.status(500).json({ error: "storage path not configured" });
@@ -25,7 +25,8 @@ class CachedListPlugin {
           ? self.storagePath
           : path.resolve(process.cwd(), self.storagePath);
 
-        const results = await scanStorage(absolute);
+        const includeEmpty = isTruthy(req.query && req.query.include_empty);
+        const results = await scanStorage(absolute, { includeEmpty });
         res.status(200).json(results);
       } catch (err) {
         self.logger.error(
@@ -38,7 +39,8 @@ class CachedListPlugin {
   }
 }
 
-async function scanStorage(storagePath) {
+async function scanStorage(storagePath, options) {
+  const includeEmpty = Boolean(options && options.includeEmpty);
   const stat = await fs.promises.stat(storagePath).catch(() => null);
   if (!stat || !stat.isDirectory()) {
     throw new Error(`storage directory not found: ${storagePath}`);
@@ -62,11 +64,11 @@ async function scanStorage(storagePath) {
         .catch(() => []);
       for (const sub of subEntries) {
         if (!sub.isDirectory()) continue;
-        const pkg = await readManifest(path.join(dir, sub.name));
+        const pkg = await readManifest(path.join(dir, sub.name), includeEmpty);
         if (pkg) results.push(pkg);
       }
     } else {
-      const pkg = await readManifest(dir);
+      const pkg = await readManifest(dir, includeEmpty);
       if (pkg) results.push(pkg);
     }
   }
@@ -75,7 +77,7 @@ async function scanStorage(storagePath) {
   return results;
 }
 
-async function readManifest(pkgDir) {
+async function readManifest(pkgDir, includeEmpty) {
   const manifestPath = path.join(pkgDir, "package.json");
   const content = await fs.promises
     .readFile(manifestPath, "utf-8")
@@ -92,7 +94,8 @@ async function readManifest(pkgDir) {
   if (!json || typeof json.name !== "string") return null;
 
   const cachedVersions = await listCachedVersions(pkgDir, json.name);
-  if (cachedVersions.length === 0) return null;
+  // 默认只返回至少有一个 tarball 的包；体检需要看到纯 uplink 残留的空壳元数据
+  if (cachedVersions.length === 0 && !includeEmpty) return null;
 
   const allVersions = json.versions ? Object.keys(json.versions) : [];
   allVersions.sort(compareVersions);
@@ -119,6 +122,8 @@ async function readManifest(pkgDir) {
     latest,
     versions: allVersions,
     cached_versions: cachedVersions,
+    // 原始 dist-tags.latest（可能为 null）；`latest` 字段在缺失时会回退到最高版本
+    dist_latest: distTagLatest,
   };
 }
 
@@ -141,6 +146,10 @@ async function listCachedVersions(pkgDir, pkgName) {
 
   versions.sort(compareVersions);
   return versions;
+}
+
+function isTruthy(value) {
+  return value === "1" || value === "true";
 }
 
 function compareVersions(a, b) {
