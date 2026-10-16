@@ -626,6 +626,7 @@ async fn execute_publish(
         .await
         {
             Ok(Ok(())) => {
+                promote_latest_best_effort(&target_client, &task, timeout_secs).await;
                 update_task_status(
                     &tasks,
                     &task.id,
@@ -679,6 +680,7 @@ async fn execute_publish(
                     .await
                     {
                         Ok(Ok(())) => {
+                            promote_latest_best_effort(&target_client, &task, timeout_secs).await;
                             update_task_status(
                                 &tasks,
                                 &task.id,
@@ -760,6 +762,19 @@ async fn execute_publish(
             }
         }
     }
+}
+
+/// 推进 latest 失败不影响上传结果：tarball 已落盘，体检页可再修正 dist-tags。
+async fn promote_latest_best_effort(
+    client: &RegistryClient,
+    task: &CacheTask,
+    timeout_secs: u64,
+) {
+    let _ = tokio::time::timeout(
+        Duration::from_secs(timeout_secs),
+        client.promote_latest(&task.package_name, &task.version),
+    )
+    .await;
 }
 
 fn extract_package_json_from_tarball(tarball_data: &[u8]) -> Result<serde_json::Value, String> {

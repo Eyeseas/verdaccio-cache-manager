@@ -484,6 +484,33 @@ impl RegistryClient {
         self.check_manage_response(resp, name, Some(version)).await
     }
 
+    /// publish 不携带 dist-tags 时 Verdaccio 不会改动已有的 latest。离线私服里
+    /// latest 常停在旧的 uplink 缓存版本上，而 npm 只要 latest 满足范围就优先
+    /// 选它，导致装到没有 tarball 的旧版本。publish 成功后按需推进 latest。
+    pub async fn promote_latest(&self, name: &str, version: &str) -> Result<bool, String> {
+        let doc = self.fetch_packument(name).await?;
+        let current = doc["dist-tags"]["latest"].as_str();
+        if !should_promote_latest(current, version) {
+            return Ok(false);
+        }
+
+        self.ensure_token().await?;
+        let url = format!(
+            "{}/-/package/{}/dist-tags/latest",
+            self.registry_url,
+            name.replace('/', "%2f")
+        );
+        let resp = self
+            .apply_auth(self.http.put(&url))
+            .header("content-type", "application/json")
+            .json(&version)
+            .send()
+            .await
+            .map_err(|e| format!("更新 dist-tags 失败: {}", e))?;
+        self.check_manage_response(resp, name, Some(version)).await?;
+        Ok(true)
+    }
+
     async fn check_manage_response(
         &self,
         resp: reqwest::Response,
@@ -589,6 +616,21 @@ pub struct DownloadFailure {
 ///
 /// 单个包下载/写入失败不会中止整批：失败项收集进 [`DownloadSummary::failures`]，
 /// 其余包继续下载。仅当创建目录或构造 HTTP client 等前置步骤失败时返回 `Err`。
+/// 新发布版本是否应成为 latest：latest 缺失 / 不可解析，或新版本为正式版且
+/// 高于当前 latest（当前 latest 为预发布版时，正式版总是优先）。补发旧版本不回退 latest。
+pub fn should_promote_latest(current: Option<&str>, version: &str) -> bool {
+    let Ok(new) = node_semver::Version::parse(version) else {
+        return false;
+    };
+    let Some(Ok(cur)) = current.map(node_semver::Version::parse) else {
+        return true;
+    };
+    if new.is_prerelease() {
+        return false;
+    }
+    cur.is_prerelease() || new > cur
+}
+
 pub async fn download_tarballs_to_dir<F>(
     packages: &[(String, String)],
     output_dir: &std::path::Path,
@@ -726,6 +768,39 @@ mod tests {
             },
             "time": { "1.0.0": "t1", "2.0.0": "t2" }
         })
+    }
+
+    #[test]
+    fn should_promote_latest_only_moves_forward() {
+        assert!(should_promote_latest(Some("4.0.3"), "4.0.4"));
+        assert!(!should_promote_latest(Some("4.0.4"), "4.0.3"));
+        assert!(!should_promote_latest(Some("4.0.4"), "4.0.4"));
+        assert!(should_promote_latest(None, "1.0.0"));
+        assert!(should_promote_latest(Some("2.0.0-beta.1"), "1.9.0"));
+        assert!(!should_promote_latest(Some("1.0.0"), "2.0.0-beta.1"));
+        assert!(!should_promote_latest(Some("1.0.0"), "not-semver"));
+    }
+
+    #[tokio::test]
+    async fn promote_latest_puts_dist_tag_when_newer() {
+        let server = MockServer::start().await;
+        mock_login(&server).await;
+        Mock::given(method("GET"))
+            .and(path("/left-pad"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(packument()))
+            .mount(&server)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path("/-/package/left-pad/dist-tags/latest"))
+            .and(wiremock::matchers::body_json(json!("2.1.0")))
+            .respond_with(ResponseTemplate::new(201).set_body_json(json!({"ok":true})))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = RegistryClient::new(&server.uri());
+        assert!(client.promote_latest("left-pad", "2.1.0").await.unwrap());
+        assert!(!client.promote_latest("left-pad", "1.0.0").await.unwrap());
     }
 
     #[tokio::test]
