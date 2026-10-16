@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.1.38 (2026-10-16)
+
+### Features
+- 仓库体检支持「远程插件」模式：storage 位于远程服务器或 Docker 卷、本机无法直接访问时，通过 verdaccio-cached-list 插件读取 storage 状态，并通过 Registry API 修复（一次 PUT 剔除幽灵版本并修正 latest，无 tarball 的包整包删除）；服务器插件过旧时给出升级提示 (8141608)
+- verdaccio-cached-list 插件升级到 0.2.0：新增 `include_empty=1` 参数返回无 tarball 的包，每个条目新增原始 `dist_latest` 字段；默认响应保持兼容 (3643484)
+
 ## v0.1.37 (2026-10-16)
 
 ### Features
