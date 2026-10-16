@@ -141,6 +141,23 @@ async fn check_storage_health(
 }
 
 #[tauri::command]
+async fn check_remote_storage_health(
+    registry_url: String,
+) -> Result<storage_health::HealthReport, String> {
+    let client = registry_client::RegistryClient::new(&registry_url);
+    storage_health::check_remote(&client).await
+}
+
+#[tauri::command]
+async fn repair_remote_storage_packages(
+    registry_url: String,
+    packages: Vec<storage_health::PackageHealth>,
+) -> Result<Vec<storage_health::RepairOutcome>, String> {
+    let client = registry_client::RegistryClient::new(&registry_url);
+    Ok(storage_health::repair_remote(&client, packages).await)
+}
+
+#[tauri::command]
 async fn repair_storage_packages(
     storage_path: String,
     names: Vec<String>,
@@ -1079,6 +1096,8 @@ pub fn run() {
             get_verdaccio_plugin_info,
             check_storage_health,
             repair_storage_packages,
+            check_remote_storage_health,
+            repair_remote_storage_packages,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

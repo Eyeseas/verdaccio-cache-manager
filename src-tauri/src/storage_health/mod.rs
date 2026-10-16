@@ -5,13 +5,14 @@
 //! 2. latest 过时：npm 只要 `dist-tags.latest` 满足范围就优先选它，即使有更高
 //!    版本。latest 停在旧的 uplink 缓存版本上时，后补的新版本永远不会被选中。
 
+use crate::registry_client::RegistryClient;
 use crate::storage_scanner::{ensure_storage_dir, list_cached_versions, package_dirs};
 use node_semver::Version;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::{Component, Path, PathBuf};
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PackageHealth {
     pub name: String,
     /// 元数据中存在、但本地无 tarball 的版本（升序）
@@ -35,6 +36,8 @@ pub struct HealthReport {
     pub unhealthy: Vec<PackageHealth>,
     /// package.json 无法读取或解析的包目录
     pub unreadable: Vec<String>,
+    /// 远程模式下插件版本过旧（< 0.2.0）：看不到无 tarball 的包，latest 判断不精确
+    pub plugin_outdated: bool,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -100,7 +103,97 @@ pub fn check_storage(storage_path: &Path) -> Result<HealthReport, String> {
         scanned,
         unhealthy,
         unreadable,
+        plugin_outdated: false,
     })
+}
+
+/// 远程体检：通过 Verdaccio 内的 verdaccio-cached-list 插件读取 storage 状态，
+/// 适用于 storage 在远端服务器 / Docker 卷中、本机无法直接访问的情况。
+pub async fn check_remote(client: &RegistryClient) -> Result<HealthReport, String> {
+    let entries = client.fetch_plugin_entries(true).await.map_err(|e| {
+        if e == "PLUGIN_NOT_INSTALLED" {
+            "Verdaccio 未安装 verdaccio-cached-list 插件，请在设置页导出插件包并安装".to_string()
+        } else {
+            e
+        }
+    })?;
+
+    let plugin_outdated = entries
+        .first()
+        .is_some_and(|e| e.get("dist_latest").is_none());
+    let str_arr = |entry: &serde_json::Value, key: &str| -> Vec<String> {
+        entry[key]
+            .as_array()
+            .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+            .unwrap_or_default()
+    };
+
+    let mut unhealthy: Vec<PackageHealth> = entries
+        .iter()
+        .filter_map(|entry| {
+            let name = entry["name"].as_str()?.to_string();
+            // 旧插件没有 dist_latest，只能退回到 latest（缺失时它会被填成最高版本）
+            let latest = entry
+                .get("dist_latest")
+                .unwrap_or(&entry["latest"])
+                .as_str()
+                .map(str::to_string);
+            assess(
+                name,
+                str_arr(entry, "versions"),
+                &str_arr(entry, "cached_versions"),
+                latest,
+            )
+        })
+        .collect();
+
+    unhealthy.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(HealthReport {
+        scanned: entries.len(),
+        unhealthy,
+        unreadable: vec![],
+        plugin_outdated,
+    })
+}
+
+/// 远程修复：按体检结果通过 Registry API 修改元数据。
+/// 无 tarball 的包整包删除；其余包一次 PUT 剔除幽灵版本并修正 latest。
+pub async fn repair_remote(client: &RegistryClient, packages: Vec<PackageHealth>) -> Vec<RepairOutcome> {
+    let mut outcomes = Vec::with_capacity(packages.len());
+    for pkg in packages {
+        let new_latest = pkg.expected_latest.clone().filter(|_| pkg.latest_stale);
+        let result = if pkg.cached_versions.is_empty() {
+            client
+                .unpublish_package(&pkg.name, None)
+                .await
+                .map(|_| RepairAction::Removed)
+        } else if pkg.missing_versions.is_empty() && new_latest.is_none() {
+            Ok(RepairAction::Skipped)
+        } else {
+            client
+                .prune_versions(&pkg.name, &pkg.missing_versions, new_latest.as_deref())
+                .await
+                .map(|_| RepairAction::Repaired)
+        };
+
+        outcomes.push(match result {
+            Ok(RepairAction::Skipped) => RepairOutcome::new(&pkg.name, RepairAction::Skipped),
+            Ok(action) => RepairOutcome {
+                name: pkg.name,
+                action,
+                removed_versions: pkg.missing_versions,
+                previous_latest: pkg.latest,
+                new_latest,
+                backup_path: None,
+                message: None,
+            },
+            Err(e) => RepairOutcome {
+                message: Some(e),
+                ..RepairOutcome::new(&pkg.name, RepairAction::Failed)
+            },
+        });
+    }
+    outcomes
 }
 
 pub fn repair_packages(storage_path: &Path, names: &[String]) -> Result<Vec<RepairOutcome>, String> {
@@ -154,8 +247,24 @@ fn inspect_package(pkg_dir: &Path) -> Result<Option<PackageHealth>, String> {
         .ok_or_else(|| "package.json 缺少 name".to_string())?
         .to_string();
 
-    let (cached_versions, missing_versions) = partition_versions(&json, pkg_dir, &name);
-    let latest = latest_of(&json);
+    let tarballs = list_cached_versions(pkg_dir, &name);
+    Ok(assess(name, manifest_versions(&json), &tarballs, latest_of(&json)))
+}
+
+/// 判定单个包是否有问题。`versions` 为元数据中的版本，`tarballs` 为本地实际
+/// 存在 tarball 的版本，`latest` 为原始 dist-tags.latest。本地与远程模式共用。
+fn assess(
+    name: String,
+    versions: Vec<String>,
+    tarballs: &[String],
+    latest: Option<String>,
+) -> Option<PackageHealth> {
+    let tarball_set: HashSet<&str> = tarballs.iter().map(String::as_str).collect();
+    let (mut cached_versions, mut missing_versions): (Vec<String>, Vec<String>) = versions
+        .into_iter()
+        .partition(|v| tarball_set.contains(v.as_str()));
+    sort_versions(&mut cached_versions);
+    sort_versions(&mut missing_versions);
     let expected_latest = preferred_latest(&cached_versions);
     let latest_missing = latest
         .as_deref()
@@ -163,10 +272,10 @@ fn inspect_package(pkg_dir: &Path) -> Result<Option<PackageHealth>, String> {
     let latest_stale = expected_latest.is_some() && latest != expected_latest;
 
     if missing_versions.is_empty() && !latest_stale {
-        return Ok(None);
+        return None;
     }
 
-    Ok(Some(PackageHealth {
+    Some(PackageHealth {
         name,
         missing_versions,
         cached_versions,
@@ -174,7 +283,7 @@ fn inspect_package(pkg_dir: &Path) -> Result<Option<PackageHealth>, String> {
         expected_latest,
         latest_missing,
         latest_stale,
-    }))
+    })
 }
 
 /// 包名映射到 storage 下的目录，拒绝可能越出 storage 的名称。
@@ -435,6 +544,16 @@ mod tests {
             repair_packages(tmp.path(), &["ok".to_string(), "../evil".to_string()]).unwrap();
         assert_eq!(outcomes[0].action, RepairAction::Skipped);
         assert_eq!(outcomes[1].action, RepairAction::Failed);
+    }
+
+    #[test]
+    fn assess_flags_package_without_any_tarball() {
+        let pkg = assess("ghost".into(), vec!["1.0.0".into()], &[], Some("1.0.0".into())).unwrap();
+        assert_eq!(pkg.missing_versions, vec!["1.0.0"]);
+        assert!(pkg.cached_versions.is_empty());
+        assert!(pkg.latest_missing);
+        assert!(!pkg.latest_stale);
+        assert!(assess("ok".into(), vec!["1.0.0".into()], &["1.0.0".into()], Some("1.0.0".into())).is_none());
     }
 
     #[test]

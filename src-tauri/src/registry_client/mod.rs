@@ -102,8 +102,16 @@ impl RegistryClient {
         Ok(())
     }
 
-    pub async fn list_cached_via_plugin(&self) -> Result<Vec<SearchResult>, String> {
-        let url = format!("{}/-/cached-packages", self.registry_url);
+    /// 拉取 verdaccio-cached-list 插件的原始条目。`include_empty` 需插件 >= 0.2.0，
+    /// 旧版插件会忽略该参数。
+    pub async fn fetch_plugin_entries(
+        &self,
+        include_empty: bool,
+    ) -> Result<Vec<serde_json::Value>, String> {
+        let mut url = format!("{}/-/cached-packages", self.registry_url);
+        if include_empty {
+            url.push_str("?include_empty=1");
+        }
         let resp = self
             .http
             .get(&url)
@@ -125,9 +133,14 @@ impl RegistryClient {
             .await
             .map_err(|e| format!("解析响应失败: {}", e))?;
 
-        let arr = body
-            .as_array()
-            .ok_or_else(|| "响应不是数组".to_string())?;
+        match body {
+            serde_json::Value::Array(arr) => Ok(arr),
+            _ => Err("响应不是数组".to_string()),
+        }
+    }
+
+    pub async fn list_cached_via_plugin(&self) -> Result<Vec<SearchResult>, String> {
+        let arr = self.fetch_plugin_entries(false).await?;
 
         let results = arr
             .iter()
@@ -511,6 +524,52 @@ impl RegistryClient {
         Ok(true)
     }
 
+    /// 一次 PUT 完成：剔除 `remove` 中的版本，删除指向它们的非 latest tag，
+    /// 并在 `latest` 为 Some 时改写 latest。用于离线私服修复幽灵版本，
+    /// 这些版本本就没有 tarball，因此不需要逐个 DELETE。
+    pub async fn prune_versions(
+        &self,
+        name: &str,
+        remove: &[String],
+        latest: Option<&str>,
+    ) -> Result<(), String> {
+        self.ensure_token().await?;
+        let mut doc = self.fetch_packument(name).await?;
+        let rev = doc["_rev"]
+            .as_str()
+            .unwrap_or("0-0000000000000000")
+            .to_string();
+
+        if let Some(obj) = doc["versions"].as_object_mut() {
+            obj.retain(|v, _| !remove.contains(v));
+        }
+        if let Some(obj) = doc["time"].as_object_mut() {
+            obj.retain(|v, _| !remove.contains(v));
+        }
+        if let Some(tags) = doc["dist-tags"].as_object_mut() {
+            tags.retain(|tag, v| {
+                tag == "latest" || v.as_str().is_some_and(|v| !remove.iter().any(|r| r == v))
+            });
+        }
+        if let Some(v) = latest {
+            doc["dist-tags"]["latest"] = serde_json::Value::String(v.to_string());
+        }
+        if let Some(map) = doc.as_object_mut() {
+            map.remove("_attachments");
+            map.remove("_revisions");
+        }
+
+        let url = format!("{}/{}/-rev/{}", self.registry_url, name, rev);
+        let resp = self
+            .apply_auth(self.http.put(&url))
+            .header("content-type", "application/json")
+            .json(&doc)
+            .send()
+            .await
+            .map_err(|e| format!("提交修改失败: {}", e))?;
+        self.check_manage_response(resp, name, None).await
+    }
+
     async fn check_manage_response(
         &self,
         resp: reqwest::Response,
@@ -801,6 +860,48 @@ mod tests {
         let client = RegistryClient::new(&server.uri());
         assert!(client.promote_latest("left-pad", "2.1.0").await.unwrap());
         assert!(!client.promote_latest("left-pad", "1.0.0").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn prune_versions_puts_pruned_doc_with_new_latest() {
+        let server = MockServer::start().await;
+        mock_login(&server).await;
+        let mut doc = packument();
+        doc["versions"]["2.1.0"] = json!({ "name": "left-pad", "version": "2.1.0" });
+        doc["dist-tags"]["beta"] = json!("2.1.0");
+        Mock::given(method("GET"))
+            .and(path("/left-pad"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(doc))
+            .mount(&server)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path("/left-pad/-rev/1-abc"))
+            .and(wiremock::matchers::body_partial_json(json!({
+                "dist-tags": { "latest": "1.0.0" },
+                "versions": { "1.0.0": { "version": "1.0.0" } }
+            })))
+            .respond_with(ResponseTemplate::new(201).set_body_json(json!({"ok":true})))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = RegistryClient::new(&server.uri());
+        client
+            .prune_versions("left-pad", &["2.0.0".to_string(), "2.1.0".to_string()], Some("1.0.0"))
+            .await
+            .expect("prune should succeed");
+
+        let put = server
+            .received_requests()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|r| r.method.as_str() == "PUT" && r.url.path() == "/left-pad/-rev/1-abc")
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&put.body).unwrap();
+        assert_eq!(body["versions"].as_object().unwrap().len(), 1);
+        assert!(body["dist-tags"].get("beta").is_none());
+        assert!(body["time"].get("2.0.0").is_none());
     }
 
     #[tokio::test]

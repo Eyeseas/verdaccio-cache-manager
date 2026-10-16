@@ -12,6 +12,7 @@ export interface HealthReport {
   scanned: number;
   unhealthy: PackageHealth[];
   unreadable: string[];
+  plugin_outdated: boolean;
 }
 
 export type RepairAction = "repaired" | "removed" | "skipped" | "failed";

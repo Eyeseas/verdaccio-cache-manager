@@ -10,9 +10,11 @@ import { Input } from "@/components/ui/input";
 import {
   Copy,
   FolderOpen,
+  Globe,
   Loader2,
   Search,
   ShieldCheck,
+  TriangleAlert,
   Stethoscope,
   Wrench,
 } from "lucide-react";
@@ -88,6 +90,12 @@ function healthBadges(pkg: PackageHealth) {
   return null;
 }
 
+type Mode = "local" | "remote";
+
+const LOCAL_REPAIR_NOTICE = "原文件会备份为 package.json.<时间戳>.bak。";
+const REMOTE_REPAIR_NOTICE =
+  "将通过 Registry API 修改（需要 unpublish/publish 权限），不会生成备份；无 tarball 的包会被整包删除。";
+
 function describeProblem(pkg: PackageHealth): string {
   const parts: string[] = [];
   if (pkg.latest_stale) {
@@ -103,7 +111,9 @@ function describeProblem(pkg: PackageHealth): string {
 
 export function StorageHealthPage() {
   const { config, loadConfig } = useConfigStore();
+  const [mode, setMode] = useState<Mode>("local");
   const [storagePath, setStoragePath] = useState("");
+  const [registryUrl, setRegistryUrl] = useState("");
   const [report, setReport] = useState<HealthReport | null>(null);
   const [scanning, setScanning] = useState(false);
   const [repairing, setRepairing] = useState(false);
@@ -122,6 +132,22 @@ export function StorageHealthPage() {
     }
   }, [config.verdaccio_storage_path, storagePath]);
 
+  useEffect(() => {
+    if (!registryUrl && config.registry_url) {
+      setRegistryUrl(config.registry_url);
+    }
+  }, [config.registry_url, registryUrl]);
+
+  const target = mode === "local" ? storagePath : registryUrl;
+
+  const switchMode = (next: Mode) => {
+    if (next === mode) return;
+    setMode(next);
+    setReport(null);
+    setSelected(new Set());
+    setOutcomes(new Map());
+  };
+
   const packages = useMemo(() => {
     const list = report?.unhealthy ?? [];
     const q = query.trim().toLowerCase();
@@ -135,16 +161,16 @@ export function StorageHealthPage() {
     overscan: 12,
   });
 
-  const runScan = async (path = storagePath) => {
-    if (!path) {
-      toast.error("请先填写或选择 Verdaccio storage 目录");
+  const runScan = async (value = target) => {
+    if (!value) {
+      toast.error(mode === "local" ? "请先填写或选择 Verdaccio storage 目录" : "请先填写 Registry 地址");
       return;
     }
     setScanning(true);
     try {
-      const result = await invoke<HealthReport>("check_storage_health", {
-        storagePath: path,
-      });
+      const result = mode === "local"
+        ? await invoke<HealthReport>("check_storage_health", { storagePath: value })
+        : await invoke<HealthReport>("check_remote_storage_health", { registryUrl: value });
       setReport(result);
       setSelected(new Set());
       setOutcomes(new Map());
@@ -195,17 +221,19 @@ export function StorageHealthPage() {
     const names = [...selected];
     if (names.length === 0) return;
     const confirmed = await ask(
-      `将修改 ${names.length} 个包的 package.json：剔除没有 tarball 的版本，并把 dist-tags.latest 改为本地可用的最高正式版；完全没有 tarball 的包会移除其元数据。\n\n原文件会备份为 package.json.<时间戳>.bak。\n\n仅适用于离线 Verdaccio：若 uplink 仍可访问，元数据会被重新合并回来。`,
+      `将修改 ${names.length} 个包的元数据：剔除没有 tarball 的版本，并把 dist-tags.latest 改为本地可用的最高正式版；完全没有 tarball 的包会移除其元数据。\n\n${mode === "local" ? LOCAL_REPAIR_NOTICE : REMOTE_REPAIR_NOTICE}\n\n仅适用于离线 Verdaccio：若 uplink 仍可访问，元数据会被重新合并回来。`,
       { title: "确认修复", kind: "warning", okLabel: "修复", cancelLabel: "取消" },
     );
     if (!confirmed) return;
 
     setRepairing(true);
     try {
-      const result = await invoke<RepairOutcome[]>("repair_storage_packages", {
-        storagePath,
-        names,
-      });
+      const result = mode === "local"
+        ? await invoke<RepairOutcome[]>("repair_storage_packages", { storagePath, names })
+        : await invoke<RepairOutcome[]>("repair_remote_storage_packages", {
+            registryUrl,
+            packages: (report?.unhealthy ?? []).filter((p) => selected.has(p.name)),
+          });
       setOutcomes((prev) => {
         const next = new Map(prev);
         result.forEach((o) => next.set(o.name, o));
@@ -237,16 +265,47 @@ export function StorageHealthPage() {
       </div>
 
       <div className="mb-3 flex gap-2">
-        <Input
-          value={storagePath}
-          onChange={(e) => setStoragePath(e.target.value)}
-          placeholder="/path/to/verdaccio/storage"
-          className="font-mono"
-        />
-        <Button variant="outline" size="icon" onClick={handleSelectDir} disabled={scanning}>
-          <FolderOpen className="h-4 w-4" />
-        </Button>
-        <Button onClick={() => runScan()} disabled={scanning || !storagePath}>
+        <div className="flex shrink-0 rounded-md border p-0.5">
+          <Button
+            variant={mode === "local" ? "secondary" : "ghost"}
+            size="sm"
+            onClick={() => switchMode("local")}
+            disabled={scanning || repairing}
+          >
+            <FolderOpen className="mr-1.5 h-3.5 w-3.5" />
+            本地目录
+          </Button>
+          <Button
+            variant={mode === "remote" ? "secondary" : "ghost"}
+            size="sm"
+            onClick={() => switchMode("remote")}
+            disabled={scanning || repairing}
+          >
+            <Globe className="mr-1.5 h-3.5 w-3.5" />
+            远程插件
+          </Button>
+        </div>
+        {mode === "local" ? (
+          <>
+            <Input
+              value={storagePath}
+              onChange={(e) => setStoragePath(e.target.value)}
+              placeholder="/path/to/verdaccio/storage"
+              className="font-mono"
+            />
+            <Button variant="outline" size="icon" onClick={handleSelectDir} disabled={scanning}>
+              <FolderOpen className="h-4 w-4" />
+            </Button>
+          </>
+        ) : (
+          <Input
+            value={registryUrl}
+            onChange={(e) => setRegistryUrl(e.target.value)}
+            placeholder="http://localhost:4873"
+            className="font-mono"
+          />
+        )}
+        <Button onClick={() => runScan()} disabled={scanning || !target}>
           {scanning ? (
             <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />
           ) : (
@@ -259,12 +318,23 @@ export function StorageHealthPage() {
       {!report ? (
         <div className="flex flex-1 flex-col items-center justify-center rounded-lg border-2 border-dashed p-12 text-center">
           <Stethoscope className="mb-4 h-12 w-12 text-muted-foreground" />
-          <p className="mb-2 text-lg font-medium">选择 Verdaccio storage 目录</p>
-          <p className="text-sm text-muted-foreground">
-            需要能直接访问 storage 目录（本机路径或 SMB/NFS 挂载），默认使用设置中的 Storage 路径
-          </p>
+          {mode === "local" ? (
+            <>
+              <p className="mb-2 text-lg font-medium">选择 Verdaccio storage 目录</p>
+              <p className="text-sm text-muted-foreground">
+                需要能直接访问 storage 目录（本机路径或 SMB/NFS 挂载），默认使用设置中的 Storage 路径
+              </p>
+            </>
+          ) : (
+            <>
+              <p className="mb-2 text-lg font-medium">通过插件远程体检</p>
+              <p className="max-w-lg text-sm text-muted-foreground">
+                适用于 storage 在远程服务器或 Docker 卷中的情况。需要 Verdaccio 安装 verdaccio-cached-list 插件 0.2.0 及以上（设置页可导出），修复通过 Registry API 完成
+              </p>
+            </>
+          )}
         </div>
-      ) : report.unhealthy.length === 0 ? (
+      ) : report.unhealthy.length === 0 && !report.plugin_outdated ? (
         <div className="flex flex-1 flex-col items-center justify-center rounded-lg border p-12 text-center">
           <ShieldCheck className="mb-4 h-12 w-12 text-green-600" />
           <p className="mb-2 text-lg font-medium">一切正常</p>
@@ -274,6 +344,14 @@ export function StorageHealthPage() {
         </div>
       ) : (
         <>
+          {report.plugin_outdated && (
+            <div className="mb-3 flex items-start gap-2 rounded-md border border-yellow-300 bg-yellow-500/10 p-3 text-sm text-yellow-700 dark:text-yellow-500">
+              <TriangleAlert className="mt-0.5 h-4 w-4 shrink-0" />
+              <span>
+                服务器上的 verdaccio-cached-list 插件版本过旧：看不到完全没有 tarball 的包，latest 缺失时的判断也不准确。请在设置页导出 0.2.0 插件包，重新安装后重启 Verdaccio。
+              </span>
+            </div>
+          )}
           <div className="mb-3 flex items-center justify-between gap-3">
             <span className="text-sm text-muted-foreground">
               已检查 {report.scanned} 个包，<strong className="text-foreground">{report.unhealthy.length}</strong> 个存在问题
