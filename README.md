@@ -5,7 +5,7 @@
 <h1 align="center">Verdaccio Cache Manager</h1>
 
 <p align="center">
-  <img alt="version" src="https://img.shields.io/badge/version-0.1.36-blue?style=for-the-badge" />
+  <img alt="version" src="https://img.shields.io/badge/version-0.1.37-blue?style=for-the-badge" />
   <img alt="platform" src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey?style=for-the-badge" />
   <img alt="license" src="https://img.shields.io/badge/license-MIT-green?style=for-the-badge" />
   <img alt="Fable 5" src="https://img.shields.io/badge/Fable-5-d97757?style=for-the-badge" />
