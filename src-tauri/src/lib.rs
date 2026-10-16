@@ -6,6 +6,7 @@ pub mod node_env;
 pub mod package_downgrade;
 pub mod parser;
 pub mod registry_client;
+pub mod storage_health;
 pub mod storage_scanner;
 pub mod sync_engine;
 pub mod task_engine;
@@ -127,6 +128,27 @@ async fn list_cached_via_plugin(registry_url: String) -> Result<Vec<SearchResult
 async fn scan_verdaccio_storage(storage_path: String) -> Result<Vec<SearchResult>, String> {
     let path = PathBuf::from(&storage_path);
     storage_scanner::scan_storage(&path)
+}
+
+#[tauri::command]
+async fn check_storage_health(
+    storage_path: String,
+) -> Result<storage_health::HealthReport, String> {
+    let path = PathBuf::from(&storage_path);
+    tokio::task::spawn_blocking(move || storage_health::check_storage(&path))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn repair_storage_packages(
+    storage_path: String,
+    names: Vec<String>,
+) -> Result<Vec<storage_health::RepairOutcome>, String> {
+    let path = PathBuf::from(&storage_path);
+    tokio::task::spawn_blocking(move || storage_health::repair_packages(&path, &names))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -1055,6 +1077,8 @@ pub fn run() {
             deprecate_package,
             export_verdaccio_plugin,
             get_verdaccio_plugin_info,
+            check_storage_health,
+            repair_storage_packages,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

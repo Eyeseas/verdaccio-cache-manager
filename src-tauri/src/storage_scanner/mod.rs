@@ -1,7 +1,19 @@
 use crate::registry_client::SearchResult;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 pub fn scan_storage(storage_path: &Path) -> Result<Vec<SearchResult>, String> {
+    ensure_storage_dir(storage_path)?;
+
+    let mut results: Vec<SearchResult> = package_dirs(storage_path)?
+        .iter()
+        .filter_map(|dir| read_package_manifest(dir))
+        .collect();
+
+    results.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(results)
+}
+
+pub(crate) fn ensure_storage_dir(storage_path: &Path) -> Result<(), String> {
     if !storage_path.exists() {
         return Err(format!(
             "storage 目录不存在: {}",
@@ -14,8 +26,12 @@ pub fn scan_storage(storage_path: &Path) -> Result<Vec<SearchResult>, String> {
             storage_path.display()
         ));
     }
+    Ok(())
+}
 
-    let mut results = Vec::new();
+/// 列出 storage 下所有包目录（含 `@scope/pkg` 两级结构）。
+pub(crate) fn package_dirs(storage_path: &Path) -> Result<Vec<PathBuf>, String> {
+    let mut dirs = Vec::new();
     let entries = std::fs::read_dir(storage_path).map_err(|e| e.to_string())?;
 
     for entry in entries.flatten() {
@@ -37,18 +53,15 @@ pub fn scan_storage(storage_path: &Path) -> Result<Vec<SearchResult>, String> {
             for sub in sub_entries.flatten() {
                 let sub_path = sub.path();
                 if sub_path.is_dir() {
-                    if let Some(pkg) = read_package_manifest(&sub_path) {
-                        results.push(pkg);
-                    }
+                    dirs.push(sub_path);
                 }
             }
-        } else if let Some(pkg) = read_package_manifest(&path) {
-            results.push(pkg);
+        } else {
+            dirs.push(path);
         }
     }
 
-    results.sort_by(|a, b| a.name.cmp(&b.name));
-    Ok(results)
+    Ok(dirs)
 }
 
 fn read_package_manifest(pkg_dir: &Path) -> Option<SearchResult> {
@@ -102,7 +115,7 @@ fn read_package_manifest(pkg_dir: &Path) -> Option<SearchResult> {
     })
 }
 
-fn list_cached_versions(pkg_dir: &Path, pkg_name: &str) -> Vec<String> {
+pub(crate) fn list_cached_versions(pkg_dir: &Path, pkg_name: &str) -> Vec<String> {
     let name_part = pkg_name.rsplit('/').next().unwrap_or(pkg_name);
     let prefix = format!("{}-", name_part);
 

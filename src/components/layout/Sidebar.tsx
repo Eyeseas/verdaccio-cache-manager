@@ -1,5 +1,5 @@
 import { NavLink } from "react-router-dom";
-import { Search, FileInput, Upload, Settings, RefreshCw, FileDown } from "lucide-react";
+import { Search, FileInput, Upload, Settings, RefreshCw, FileDown, Stethoscope } from "lucide-react";
 import { useSyncStore } from "@/stores/syncStore";
 
 const navItems = [
@@ -7,6 +7,7 @@ const navItems = [
   { to: "/import", icon: FileInput, label: "导入" },
   { to: "/downgrade", icon: FileDown, label: "降级" },
   { to: "/upload", icon: Upload, label: "上传" },
+  { to: "/health", icon: Stethoscope, label: "体检" },
   { to: "/settings", icon: Settings, label: "设置" },
 ];
 

@@ -5,6 +5,7 @@ import { ImportPage } from "./pages/ImportPage";
 import { PackageJsonDowngradePage } from "./pages/PackageJsonDowngradePage";
 import { UploadPage } from "./pages/UploadPage";
 import { SettingsPage } from "./pages/SettingsPage";
+import { StorageHealthPage } from "./pages/StorageHealthPage";
 import { Toaster } from "./components/ui/sonner";
 
 export default function App() {
@@ -16,6 +17,7 @@ export default function App() {
           <Route path="/import" element={<ImportPage />} />
           <Route path="/downgrade" element={<PackageJsonDowngradePage />} />
           <Route path="/upload" element={<UploadPage />} />
+          <Route path="/health" element={<StorageHealthPage />} />
           <Route path="/settings" element={<SettingsPage />} />
         </Route>
       </Routes>
