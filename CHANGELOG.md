@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.1.37 (2026-10-16)
+
+### Features
+- 新增「仓库体检」页：扫描 Verdaccio storage，找出元数据中存在但本地没有 tarball 的幽灵版本，以及过时的 dist-tags.latest；支持一键修复（剔除幽灵版本、把 latest 修正为本地最高正式版，无 tarball 的包移除元数据，修改前自动备份 package.json）和复制缺失清单用于外网补包 (6f26bfb)
+
+### Bug Fixes
+- 修复离线 Verdaccio 安装时缺包（tarball 返回 500）：上传 publish 不携带 dist-tags 导致 latest 停留在旧的 uplink 缓存版本，而 npm 只要 latest 满足范围就优先选它；现在 publish 成功后会在新版本更高时推进 latest，补传旧版本不会回退 (7df9f75)
+
 ## v0.1.36 (2026-10-15)
 
 ### Features
