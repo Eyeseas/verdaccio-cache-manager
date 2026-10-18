@@ -484,27 +484,90 @@ async fn parse_file(file_path: String) -> Result<Vec<ParsedDependency>, String> 
 
 #[tauri::command]
 async fn read_dependency_file(file_path: String) -> Result<replenishment::DependencyFile, String> {
-    tokio::task::spawn_blocking(move || replenishment::read_dependency_file(&PathBuf::from(file_path)))
-        .await.map_err(|e| e.to_string())?
+    tokio::task::spawn_blocking(move || {
+        replenishment::read_dependency_file(&PathBuf::from(file_path))
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-async fn export_replenishment_list(output_path: String, list: replenishment::ReplenishmentList) -> Result<(), String> {
-    tokio::task::spawn_blocking(move || replenishment::write_list(&PathBuf::from(output_path), &list))
-        .await.map_err(|e| e.to_string())?
+async fn export_replenishment_list(
+    output_path: String,
+    list: replenishment::ReplenishmentList,
+) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || {
+        replenishment::write_list(&PathBuf::from(output_path), &list)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-async fn inspect_offline_bundle(directory: String) -> Result<offline_bundle::BundleInspection, String> {
+async fn inspect_offline_bundle(
+    directory: String,
+) -> Result<offline_bundle::BundleInspection, String> {
     tokio::task::spawn_blocking(move || offline_bundle::inspect(&PathBuf::from(directory)))
-        .await.map_err(|e| e.to_string())?
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 #[derive(Serialize)]
 struct BundleImportResult {
+    inspection: offline_bundle::BundleInspection,
     tasks: Vec<CacheTask>,
+    latest: Vec<offline_bundle::LatestOutcome>,
     verification: Option<install_preflight::PreflightReport>,
     verification_error: Option<String>,
+}
+
+#[derive(Serialize)]
+struct BundleCompletion {
+    latest: Vec<offline_bundle::LatestOutcome>,
+    verification: Vec<install_preflight::PreflightReport>,
+    errors: Vec<String>,
+}
+
+#[tauri::command]
+async fn finalize_offline_upload(
+    file_paths: Vec<String>,
+    registry_url: String,
+) -> Result<BundleCompletion, String> {
+    let mut result = BundleCompletion {
+        latest: vec![],
+        verification: vec![],
+        errors: vec![],
+    };
+    let directories: std::collections::BTreeSet<_> = file_paths
+        .iter()
+        .filter_map(|path| {
+            std::path::Path::new(path)
+                .parent()
+                .map(std::path::Path::to_path_buf)
+        })
+        .collect();
+    for directory in directories {
+        match offline_bundle::read_manifest(&directory) {
+            Ok(Some(manifest)) => result
+                .latest
+                .extend(offline_bundle::apply_expected_latest(&manifest, &registry_url).await),
+            Ok(None) => {}
+            Err(error) => result.errors.push(error),
+        }
+        let list_path = directory.join("replenishment.json");
+        if list_path.exists() {
+            match replenishment::read_list(&list_path) {
+                Ok(list) => {
+                    match offline_bundle::verify_replenishment(&list, &registry_url).await {
+                        Ok(report) => result.verification.push(report),
+                        Err(error) => result.errors.push(error),
+                    }
+                }
+                Err(error) => result.errors.push(error),
+            }
+        }
+    }
+    Ok(result)
 }
 
 #[tauri::command]
@@ -516,26 +579,71 @@ async fn import_offline_bundle(
     let inspection = inspect_offline_bundle(directory).await?;
     let config = config::load_config(&app_handle);
     let batch_id = format!("offline-{}", chrono_id());
-    let engine = Arc::new(TaskEngine::new_with_history(config.concurrency, config.retry_count,
-        config.timeout_secs, Some(state.cache_db.clone())));
-    for (i, file) in inspection.files.iter().filter(|f| f.error.is_none()).enumerate() {
-        engine.add_task(CacheTask {
-            id: format!("{}-{}", batch_id, i), batch_id: batch_id.clone(),
-            package_name: file.name.clone(), version: file.version.clone(),
-            tarball_url: Some(format!("file://{}", file.path)), status: TaskStatus::Pending,
-            error: None, error_code: None, attempt_count: 0, started_at: None,
-            finished_at: None, duration_ms: None,
-        }).await;
+    let engine = Arc::new(TaskEngine::new_with_history(
+        config.concurrency,
+        config.retry_count,
+        config.timeout_secs,
+        Some(state.cache_db.clone()),
+    ));
+    for (i, file) in inspection
+        .files
+        .iter()
+        .filter(|f| f.error.is_none())
+        .enumerate()
+    {
+        engine
+            .add_task(CacheTask {
+                id: format!("{}-{}", batch_id, i),
+                batch_id: batch_id.clone(),
+                package_name: file.name.clone(),
+                version: file.version.clone(),
+                tarball_url: Some(format!("file://{}", file.path)),
+                status: TaskStatus::Pending,
+                error: None,
+                error_code: None,
+                attempt_count: 0,
+                started_at: None,
+                finished_at: None,
+                duration_ms: None,
+            })
+            .await;
     }
-    persist_initial_task_batch(&state.cache_db, &batch_id, "offline", &config.registry_url, &engine.get_tasks().await).await?;
+    persist_initial_task_batch(
+        &state.cache_db,
+        &batch_id,
+        "offline",
+        &config.registry_url,
+        &engine.get_tasks().await,
+    )
+    .await?;
     *state.task_engine.lock().await = Some(engine.clone());
-    engine.execute_all(app_handle, "file://local".into(), config.registry_url.clone()).await;
-    let (verification, verification_error) = if let Some(list) = inspection.replenishment {
-        match offline_bundle::verify_replenishment(&list, &config.registry_url).await {
-            Ok(report) => (Some(report), None), Err(error) => (None, Some(error)),
+    engine
+        .execute_all(
+            app_handle,
+            "file://local".into(),
+            config.registry_url.clone(),
+        )
+        .await;
+    let latest = if let Some(manifest) = &inspection.manifest {
+        offline_bundle::apply_expected_latest(manifest, &config.registry_url).await
+    } else {
+        vec![]
+    };
+    let (verification, verification_error) = if let Some(list) = &inspection.replenishment {
+        match offline_bundle::verify_replenishment(list, &config.registry_url).await {
+            Ok(report) => (Some(report), None),
+            Err(error) => (None, Some(error)),
         }
-    } else { (None, None) };
-    Ok(BundleImportResult { tasks: engine.get_tasks().await, verification, verification_error })
+    } else {
+        (None, None)
+    };
+    Ok(BundleImportResult {
+        inspection,
+        tasks: engine.get_tasks().await,
+        latest,
+        verification,
+        verification_error,
+    })
 }
 
 #[tauri::command]
@@ -549,14 +657,27 @@ async fn check_install_preflight(
     use tauri::Emitter;
     let node = resolve_node_version(&app_handle).await;
     let mut last_emit = std::time::Instant::now();
-    install_preflight::check_install(packages, &registry_url, expand_dependencies, node, |completed, total, current| {
-        if completed == total || last_emit.elapsed().as_millis() >= 100 {
-            let _ = app_handle.emit("install-preflight-progress", install_preflight::PreflightProgress {
-                request_id: request_id.clone(), completed, total, current: current.into(),
-            });
-            last_emit = std::time::Instant::now();
-        }
-    }).await
+    install_preflight::check_install(
+        packages,
+        &registry_url,
+        expand_dependencies,
+        node,
+        |completed, total, current| {
+            if completed == total || last_emit.elapsed().as_millis() >= 100 {
+                let _ = app_handle.emit(
+                    "install-preflight-progress",
+                    install_preflight::PreflightProgress {
+                        request_id: request_id.clone(),
+                        completed,
+                        total,
+                        current: current.into(),
+                    },
+                );
+                last_emit = std::time::Instant::now();
+            }
+        },
+    )
+    .await
 }
 
 #[derive(serde::Serialize, Clone)]
@@ -1166,6 +1287,7 @@ pub fn run() {
             export_replenishment_list,
             inspect_offline_bundle,
             import_offline_bundle,
+            finalize_offline_upload,
             check_install_preflight,
             resolve_package_versions,
             resolve_dependencies,

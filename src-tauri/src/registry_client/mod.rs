@@ -266,7 +266,7 @@ impl RegistryClient {
         req
     }
 
-    async fn fetch_packument(&self, name: &str) -> Result<serde_json::Value, String> {
+    pub(crate) async fn fetch_packument(&self, name: &str) -> Result<serde_json::Value, String> {
         let url = format!("{}/{}", self.registry_url, name);
         let resp = self
             .apply_auth(self.http.get(&url))
@@ -698,6 +698,28 @@ pub async fn download_tarballs_to_dir<F>(
 where
     F: Fn(usize, usize, &str),
 {
+    download_tarballs_from_registry(
+        packages,
+        output_dir,
+        "https://registry.npmjs.org",
+        on_progress,
+    )
+    .await
+}
+
+pub(crate) async fn download_tarballs_from_registry<F>(
+    packages: &[(String, String)],
+    output_dir: &std::path::Path,
+    registry: &str,
+    on_progress: F,
+) -> Result<DownloadSummary, String>
+where
+    F: Fn(usize, usize, &str),
+{
+    use crate::offline_bundle::{
+        integrity, shasum, verify_integrity, BundleManifest, ManifestEntry, ManifestFailure,
+    };
+    use std::collections::{HashMap, HashSet};
     use tokio::fs;
 
     fs::create_dir_all(output_dir)
@@ -710,46 +732,121 @@ where
         .build()
         .map_err(|e| format!("初始化下载客户端失败: {}", e))?;
 
+    let mut seen = HashSet::new();
+    let packages: Vec<_> = packages
+        .iter()
+        .filter(|(n, v)| seen.insert((n, v)))
+        .collect();
     let total = packages.len();
     let mut success = 0usize;
     let mut failures: Vec<DownloadFailure> = Vec::new();
+    let mut manifest = BundleManifest::new();
+    let mut metadata: HashMap<String, Result<serde_json::Value, String>> = HashMap::new();
+    let mut filenames = HashSet::new();
 
-    for (name, version) in packages {
+    for (index, (name, version)) in packages.into_iter().enumerate() {
         let disk_name = if name.starts_with('@') {
             name.replace('/', "-")
         } else {
             name.clone()
         };
-        let file_path = output_dir.join(format!("{}-{}.tgz", disk_name, version));
-
-        on_progress(success, total, &format!("{}@{}", name, version));
-
-        let url = tarball_url("https://registry.npmjs.org", name, version);
-
-        let reason = match http.get(&url).send().await {
-            Ok(resp) if resp.status().is_success() => match resp.bytes().await {
-                Ok(bytes) => match fs::write(&file_path, &bytes).await {
-                    Ok(()) => {
-                        success += 1;
-                        None
+        let file_name = format!("{}-{}.tgz", disk_name, version);
+        on_progress(index, total, &format!("{}@{}", name, version));
+        let result = async {
+            crate::replenishment::validate_package(name, version)?;
+            if !filenames.insert(file_name.to_ascii_lowercase()) {
+                return Err("导出文件名冲突".to_string());
+            }
+            if !metadata.contains_key(name) {
+                let result = async {
+                    let url = format!(
+                        "{}/{}",
+                        registry.trim_end_matches('/'),
+                        name.replace('/', "%2f")
+                    );
+                    let response = http
+                        .get(url)
+                        .header("accept", "application/json")
+                        .send()
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    if !response.status().is_success() {
+                        return Err(format!("获取导出元数据失败 (HTTP {})", response.status()));
                     }
-                    Err(e) => Some(format!("写入文件失败: {}", e)),
-                },
-                Err(e) => Some(format!("读取响应失败: {}", e)),
-            },
-            Ok(resp) => Some(format!("HTTP {}", resp.status())),
-            Err(e) => Some(e.to_string()),
-        };
+                    response
+                        .json::<serde_json::Value>()
+                        .await
+                        .map_err(|e| e.to_string())
+                }
+                .await;
+                metadata.insert(name.clone(), result);
+            }
+            let doc = metadata
+                .get(name)
+                .expect("inserted metadata")
+                .as_ref()
+                .map_err(Clone::clone)?;
+            let entry = doc["versions"]
+                .get(version)
+                .ok_or_else(|| format!("版本 {} 不存在", version))?;
+            let url = entry["dist"]["tarball"]
+                .as_str()
+                .map(str::to_string)
+                .unwrap_or_else(|| tarball_url(registry, name, version));
+            let response = http.get(url).send().await.map_err(|e| e.to_string())?;
+            if !response.status().is_success() {
+                return Err(format!("HTTP {}", response.status()));
+            }
+            let bytes = response.bytes().await.map_err(|e| e.to_string())?;
+            verify_integrity(
+                &bytes,
+                entry["dist"]["integrity"].as_str(),
+                entry["dist"]["shasum"].as_str(),
+            )?;
+            fs::write(output_dir.join(&file_name), &bytes)
+                .await
+                .map_err(|e| format!("写入文件失败: {}", e))?;
+            Ok(ManifestEntry {
+                name: name.clone(),
+                version: version.clone(),
+                file_name,
+                integrity: Some(integrity(&bytes)),
+                shasum: Some(shasum(&bytes)),
+                expected_latest: doc["dist-tags"]["latest"]
+                    .as_str()
+                    .filter(|v| crate::parser::pinned_version(v).as_deref() == Some(*v))
+                    .map(str::to_string),
+            })
+        }
+        .await;
 
-        if let Some(reason) = reason {
-            failures.push(DownloadFailure {
-                package: format!("{}@{}", name, version),
-                reason,
-            });
+        match result {
+            Ok(entry) => {
+                success += 1;
+                manifest.entries.push(entry);
+            }
+            Err(reason) => {
+                manifest.failures.push(ManifestFailure {
+                    name: name.clone(),
+                    version: version.clone(),
+                    reason: reason.clone(),
+                });
+                failures.push(DownloadFailure {
+                    package: format!("{}@{}", name, version),
+                    reason,
+                });
+            }
         }
     }
 
-    on_progress(success, total, "");
+    manifest.validate()?;
+    fs::write(
+        output_dir.join("manifest.json"),
+        serde_json::to_vec_pretty(&manifest).map_err(|e| e.to_string())?,
+    )
+    .await
+    .map_err(|e| format!("写入 manifest 失败: {}", e))?;
+    on_progress(total, total, "");
     Ok(DownloadSummary {
         success,
         failed: failures.len(),
