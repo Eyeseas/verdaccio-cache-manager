@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { ask, open } from "@tauri-apps/plugin-dialog";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { useConfigStore } from "@/stores/configStore";
+import { useHealthStore } from "@/stores/healthStore";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Badge } from "@/components/ui/badge";
@@ -114,20 +115,26 @@ import { saveReplenishmentList } from "@/lib/replenishment";
 
 export function StorageHealthPage() {
   const { config, loadConfig } = useConfigStore();
-  const [mode, setMode] = useState<Mode>("local");
-  const [storagePath, setStoragePath] = useState("");
-  const [registryUrl, setRegistryUrl] = useState("");
-  const [report, setReport] = useState<HealthReport | null>(null);
-  const [scanning, setScanning] = useState(false);
+  const { latest, busy, runCheck, beginRepair, endRepair } = useHealthStore();
+  const [mode, setMode] = useState<Mode>(latest?.mode ?? config.health_check?.mode ?? "local");
+  const [storagePath, setStoragePath] = useState(latest?.mode === "local" ? latest.value : config.verdaccio_storage_path ?? "");
+  const [registryUrl, setRegistryUrl] = useState(latest?.mode === "remote" ? latest.value : config.registry_url);
+  const [report, setReport] = useState<HealthReport | null>(latest?.report ?? null);
   const [repairing, setRepairing] = useState(false);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [outcomes, setOutcomes] = useState<Map<string, RepairOutcome>>(new Map());
   const [query, setQuery] = useState("");
   const listRef = useRef<HTMLDivElement>(null);
+  const registryDefaultRef = useRef(config.registry_url);
+  const scanning = busy && !repairing;
 
   useEffect(() => {
     loadConfig();
   }, [loadConfig]);
+
+  useEffect(() => {
+    if (!useHealthStore.getState().latest) setMode(config.health_check?.mode ?? "local");
+  }, [config.health_check?.mode]);
 
   useEffect(() => {
     if (!storagePath && config.verdaccio_storage_path) {
@@ -136,12 +143,19 @@ export function StorageHealthPage() {
   }, [config.verdaccio_storage_path, storagePath]);
 
   useEffect(() => {
-    if (!registryUrl && config.registry_url) {
-      setRegistryUrl(config.registry_url);
-    }
-  }, [config.registry_url, registryUrl]);
+    const previousDefault = registryDefaultRef.current;
+    registryDefaultRef.current = config.registry_url;
+    setRegistryUrl((current) => !current || current === previousDefault ? config.registry_url : current);
+  }, [config.registry_url]);
 
   const target = mode === "local" ? storagePath : registryUrl;
+  const currentSnapshot = latest?.mode === mode && latest.value === target.trim() ? latest : null;
+
+  useEffect(() => {
+    setReport(currentSnapshot?.report ?? null);
+    setSelected(new Set());
+    setOutcomes(new Map());
+  }, [currentSnapshot]);
 
   const switchMode = (next: Mode) => {
     if (next === mode) return;
@@ -169,18 +183,9 @@ export function StorageHealthPage() {
       toast.error(mode === "local" ? "请先填写或选择 Verdaccio storage 目录" : "请先填写 Registry 地址");
       return;
     }
-    setScanning(true);
-    try {
-      const result = mode === "local"
-        ? await invoke<HealthReport>("check_storage_health", { storagePath: value })
-        : await invoke<HealthReport>("check_remote_storage_health", { registryUrl: value });
-      setReport(result);
-      setSelected(new Set());
-      setOutcomes(new Map());
-    } catch (e) {
-      toast.error("体检失败", { description: String(e) });
-    } finally {
-      setScanning(false);
+    const result = await runCheck({ mode, value }, "manual");
+    if (result?.error) {
+      toast.error("体检失败", { description: result.error });
     }
   };
 
@@ -228,6 +233,7 @@ export function StorageHealthPage() {
       { title: "确认修复", kind: "warning", okLabel: "修复", cancelLabel: "取消" },
     );
     if (!confirmed) return;
+    if (!beginRepair()) return;
 
     setRepairing(true);
     try {
@@ -253,7 +259,9 @@ export function StorageHealthPage() {
       toast.error("修复失败", { description: String(e) });
     } finally {
       setRepairing(false);
+      endRepair();
     }
+    await runCheck({ mode, value: target }, "manual");
   };
 
   const latestStaleCount = report?.unhealthy.filter((p) => p.latest_stale).length ?? 0;
@@ -266,6 +274,13 @@ export function StorageHealthPage() {
           检查 Verdaccio storage 中「元数据有、tarball 无」的版本，以及过时的 dist-tags.latest。npm 只要 latest 满足范围就优先选它，离线环境下选中无 tarball 的版本会返回 500 导致缺包。
         </p>
       </div>
+
+      {currentSnapshot && (
+        <p className={`mb-3 text-sm ${currentSnapshot.error ? "text-yellow-600" : "text-muted-foreground"}`}>
+          {currentSnapshot.source === "automatic" ? "最近自动体检" : "最近体检"}：{new Date(currentSnapshot.completedAt).toLocaleString("zh-CN")}
+          {currentSnapshot.error && `，体检失败：${currentSnapshot.error}`}
+        </p>
+      )}
 
       <div className="mb-3 flex gap-2">
         <div className="flex shrink-0 rounded-md border p-0.5">
@@ -293,10 +308,11 @@ export function StorageHealthPage() {
             <Input
               value={storagePath}
               onChange={(e) => setStoragePath(e.target.value)}
+              disabled={busy}
               placeholder="/path/to/verdaccio/storage"
               className="font-mono"
             />
-            <Button variant="outline" size="icon" onClick={handleSelectDir} disabled={scanning}>
+            <Button variant="outline" size="icon" onClick={handleSelectDir} disabled={busy}>
               <FolderOpen className="h-4 w-4" />
             </Button>
           </>
@@ -304,11 +320,12 @@ export function StorageHealthPage() {
           <Input
             value={registryUrl}
             onChange={(e) => setRegistryUrl(e.target.value)}
+            disabled={busy}
             placeholder="http://localhost:4873"
             className="font-mono"
           />
         )}
-        <Button onClick={() => runScan()} disabled={scanning || !target}>
+        <Button onClick={() => runScan()} disabled={busy || !target.trim()}>
           {scanning ? (
             <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />
           ) : (
@@ -337,7 +354,7 @@ export function StorageHealthPage() {
             </>
           )}
         </div>
-      ) : report.unhealthy.length === 0 && !report.plugin_outdated ? (
+      ) : report.unhealthy.length === 0 && report.unreadable.length === 0 && !report.plugin_outdated ? (
         <div className="flex flex-1 flex-col items-center justify-center rounded-lg border p-12 text-center">
           <ShieldCheck className="mb-4 h-12 w-12 text-green-600" />
           <p className="mb-2 text-lg font-medium">一切正常</p>
@@ -449,7 +466,7 @@ export function StorageHealthPage() {
             <span className="text-sm">
               已选 <strong>{selected.size}</strong> 个包
             </span>
-            <Button onClick={handleRepair} disabled={repairing || selected.size === 0}>
+            <Button onClick={handleRepair} disabled={busy || selected.size === 0}>
               {repairing ? (
                 <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />
               ) : (

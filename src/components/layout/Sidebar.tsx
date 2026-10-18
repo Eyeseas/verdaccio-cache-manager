@@ -1,6 +1,7 @@
 import { NavLink } from "react-router-dom";
 import { Search, FileInput, Upload, Settings, RefreshCw, FileDown, Stethoscope } from "lucide-react";
 import { useSyncStore } from "@/stores/syncStore";
+import { healthIndicator, useHealthStore } from "@/stores/healthStore";
 
 const navItems = [
   { to: "/", icon: Search, label: "搜索" },
@@ -13,6 +14,7 @@ const navItems = [
 ];
 
 export function Sidebar() {
+  const indicator = healthIndicator(useHealthStore((s) => s.latest));
   const syncStatus = useSyncStore((s) => s.status);
   const startSync = useSyncStore((s) => s.startSync);
   const isSyncing = syncStatus === "syncing";
@@ -23,8 +25,9 @@ export function Sidebar() {
         <NavLink
           key={item.to}
           to={item.to}
+          title={item.to === "/health" ? indicator.title : undefined}
           className={({ isActive }) =>
-            `flex flex-col items-center justify-center w-12 h-12 rounded-lg text-xs gap-1 transition-colors ${
+            `relative flex flex-col items-center justify-center w-12 h-12 rounded-lg text-xs gap-1 transition-colors ${
               isActive
                 ? "bg-sidebar-accent text-sidebar-accent-foreground font-medium"
                 : "text-sidebar-foreground/60 hover:text-sidebar-foreground hover:bg-sidebar-accent/50"
@@ -33,6 +36,11 @@ export function Sidebar() {
         >
           <item.icon className="h-5 w-5" />
           <span>{item.label}</span>
+          {item.to === "/health" && (indicator.warning || indicator.count > 0) && (
+            <span aria-label={indicator.title} className={`absolute -right-1 -top-1 min-w-4 rounded-full px-1 text-[10px] leading-4 ${indicator.warning ? "bg-yellow-500 text-black" : "bg-destructive text-white"}`}>
+              {indicator.count || "!"}
+            </span>
+          )}
         </NavLink>
       ))}
       <button
