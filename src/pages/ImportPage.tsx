@@ -20,6 +20,7 @@ import { DependencyResolveStatus } from "@/components/DependencyResolveStatus";
 import { RowContextMenu, type ContextMenuPosition } from "@/components/RowContextMenu";
 import { toast } from "sonner";
 import { downloadWithProgress } from "@/lib/downloadSummary";
+import type { DependencyFile, ReplenishmentList } from "./replenishmentLogic";
 import {
   allowDependencyExpansion,
   applyResolveProgress,
@@ -32,7 +33,6 @@ import {
   cacheTaskInputsFromResolved,
   createResolveRequestId,
   dependencyRootsFromResolved,
-  detectImportFileKind,
   exportPackagesFromResolvedSelection,
   getContextMenuActionState,
   getResolvedVersionOrThrow,
@@ -57,6 +57,7 @@ const SUPPORTED_FILES = [
   "package.json",
   "pnpm-lock.yaml",
   "package-lock.json",
+  "replenishment.json",
 ];
 const isDependencyFile = (path: string) => {
   const name = path.replace(/\\/g, "/").split("/").pop() ?? path;
@@ -100,6 +101,7 @@ export function ImportPage() {
   const [loading, setLoading] = useState(false);
   const [fileName, setFileName] = useState<string | null>(null);
   const [fileKind, setFileKind] = useState<ImportFileKind | null>(null);
+  const [replenishment, setReplenishment] = useState<ReplenishmentList | null>(null);
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [rootKeys, setRootKeys] = useState<Set<string>>(new Set());
   const [nodeVersion, setNodeVersion] = useState<string | null>(null);
@@ -189,6 +191,7 @@ export function ImportPage() {
     setError(null);
     setRootKeys(new Set());
     setFileKind(null);
+    setReplenishment(null);
     setDependencyResolved(false);
     resolveRequestIdRef.current = null;
   }, []);
@@ -254,12 +257,14 @@ export function ImportPage() {
       setNodeVersion(null);
       setNodeVersionChecked(false);
       setFileName(baseNameFromPath(filePath));
-      setFileKind(detectImportFileKind(filePath));
 
       try {
-        const parsed = await invoke<ParsedDependency[]>("parse_file", {
+        const file = await invoke<DependencyFile>("read_dependency_file", {
           filePath,
         });
+        const parsed = file.dependencies;
+        setFileKind(file.kind);
+        setReplenishment(file.replenishment);
 
         if (parsed.length === 0) {
           setError("未解析到任何依赖，请确认文件格式正确");
@@ -269,7 +274,7 @@ export function ImportPage() {
 
         const init = new Map<string, RowState>();
         for (const dep of parsed) {
-          init.set(rowKey(dep.name, dep.version), { status: "unknown" });
+          init.set(rowKey(dep.name, dep.version), { status: "unknown", resolvedVersion: file.kind === "replenishment" ? dep.version : undefined });
         }
         setRowStates(init);
         pendingInitSelectionRef.current = true;
@@ -773,6 +778,18 @@ export function ImportPage() {
           <div className="mb-3 flex items-center justify-between">
             <div className="flex items-center gap-3">
               <Badge variant="outline">{fileName}</Badge>
+              {replenishment && <>
+                <Badge variant="outline">补包清单 · 精确闭包</Badge>
+                <Button size="sm" variant="outline" disabled={exporting} onClick={async () => {
+                  const dir = await open({ directory: true, multiple: false });
+                  if (typeof dir !== "string") return;
+                  setExporting(true);
+                  try {
+                    await downloadWithProgress(replenishment.entries.map((e) => ({ package_name: e.name, version: e.version })), dir, replenishment);
+                  } catch (e) { toast.error("导出失败", { description: String(e) }); }
+                  finally { setExporting(false); }
+                }}>导出全部补包 tarball</Button>
+              </>}
               {importSource === "file" && fileKind === "lockfile" && (
                 <Badge
                   variant="outline"

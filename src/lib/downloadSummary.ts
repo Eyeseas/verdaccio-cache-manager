@@ -1,6 +1,7 @@
 import { toast } from "sonner";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import type { ReplenishmentList } from "@/pages/replenishmentLogic";
 
 export interface DownloadFailure {
   package: string;
@@ -53,6 +54,7 @@ interface DownloadProgressEvent {
 export async function downloadWithProgress(
   packages: { package_name: string; version: string }[],
   outputDir: string,
+  replenishment?: ReplenishmentList | null,
 ): Promise<DownloadSummary> {
   const toastId = toast.loading("准备下载...", { duration: Infinity });
   const unlisten = await listen<DownloadProgressEvent>(
@@ -69,6 +71,7 @@ export async function downloadWithProgress(
     const summary = await invoke<DownloadSummary>("download_tarballs", {
       packages,
       outputDir,
+      replenishment: replenishment ?? null,
     });
     toast.dismiss(toastId);
     toastDownloadSummary(summary);

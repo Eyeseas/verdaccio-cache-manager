@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
+import { OfflineBundleTab } from "./OfflineBundleTab";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { useTaskStore } from "@/stores/taskStore";
 import { useCacheStore } from "@/stores/cacheStore";
@@ -60,12 +61,16 @@ export function UploadPage() {
         <TabsList className="w-fit">
           <TabsTrigger value="scan">扫描 node_modules</TabsTrigger>
           <TabsTrigger value="tgz">上传 .tgz</TabsTrigger>
+          <TabsTrigger value="offline">导入离线包目录</TabsTrigger>
         </TabsList>
         <TabsContent value="scan" className="flex min-h-0 flex-1 flex-col">
           <ScanTab />
         </TabsContent>
         <TabsContent value="tgz" className="flex min-h-0 flex-1 flex-col">
           <TgzTab />
+        </TabsContent>
+        <TabsContent value="offline" className="flex min-h-0 flex-1 flex-col">
+          <OfflineBundleTab />
         </TabsContent>
       </Tabs>
     </div>

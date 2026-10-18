@@ -4,9 +4,11 @@ pub mod dependency_resolver;
 pub mod install_preflight;
 pub mod local_scanner;
 pub mod node_env;
+pub mod offline_bundle;
 pub mod package_downgrade;
 pub mod parser;
 pub mod registry_client;
+pub mod replenishment;
 pub mod storage_health;
 pub mod storage_scanner;
 pub mod sync_engine;
@@ -481,6 +483,62 @@ async fn parse_file(file_path: String) -> Result<Vec<ParsedDependency>, String> 
 }
 
 #[tauri::command]
+async fn read_dependency_file(file_path: String) -> Result<replenishment::DependencyFile, String> {
+    tokio::task::spawn_blocking(move || replenishment::read_dependency_file(&PathBuf::from(file_path)))
+        .await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn export_replenishment_list(output_path: String, list: replenishment::ReplenishmentList) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || replenishment::write_list(&PathBuf::from(output_path), &list))
+        .await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn inspect_offline_bundle(directory: String) -> Result<offline_bundle::BundleInspection, String> {
+    tokio::task::spawn_blocking(move || offline_bundle::inspect(&PathBuf::from(directory)))
+        .await.map_err(|e| e.to_string())?
+}
+
+#[derive(Serialize)]
+struct BundleImportResult {
+    tasks: Vec<CacheTask>,
+    verification: Option<install_preflight::PreflightReport>,
+    verification_error: Option<String>,
+}
+
+#[tauri::command]
+async fn import_offline_bundle(
+    app_handle: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    directory: String,
+) -> Result<BundleImportResult, String> {
+    let inspection = inspect_offline_bundle(directory).await?;
+    let config = config::load_config(&app_handle);
+    let batch_id = format!("offline-{}", chrono_id());
+    let engine = Arc::new(TaskEngine::new_with_history(config.concurrency, config.retry_count,
+        config.timeout_secs, Some(state.cache_db.clone())));
+    for (i, file) in inspection.files.iter().filter(|f| f.error.is_none()).enumerate() {
+        engine.add_task(CacheTask {
+            id: format!("{}-{}", batch_id, i), batch_id: batch_id.clone(),
+            package_name: file.name.clone(), version: file.version.clone(),
+            tarball_url: Some(format!("file://{}", file.path)), status: TaskStatus::Pending,
+            error: None, error_code: None, attempt_count: 0, started_at: None,
+            finished_at: None, duration_ms: None,
+        }).await;
+    }
+    persist_initial_task_batch(&state.cache_db, &batch_id, "offline", &config.registry_url, &engine.get_tasks().await).await?;
+    *state.task_engine.lock().await = Some(engine.clone());
+    engine.execute_all(app_handle, "file://local".into(), config.registry_url.clone()).await;
+    let (verification, verification_error) = if let Some(list) = inspection.replenishment {
+        match offline_bundle::verify_replenishment(&list, &config.registry_url).await {
+            Ok(report) => (Some(report), None), Err(error) => (None, Some(error)),
+        }
+    } else { (None, None) };
+    Ok(BundleImportResult { tasks: engine.get_tasks().await, verification, verification_error })
+}
+
+#[tauri::command]
 async fn check_install_preflight(
     app_handle: tauri::AppHandle,
     packages: Vec<ParsedDependency>,
@@ -741,6 +799,7 @@ async fn download_tarballs(
     app_handle: tauri::AppHandle,
     packages: Vec<CacheRequest>,
     output_dir: String,
+    replenishment: Option<replenishment::ReplenishmentList>,
 ) -> Result<registry_client::DownloadSummary, String> {
     use tauri::Emitter;
 
@@ -750,7 +809,8 @@ async fn download_tarballs(
         .collect();
     let app = app_handle.clone();
 
-    registry_client::download_tarballs_to_dir(
+    if let Some(list) = &replenishment { list.validate()?; }
+    let summary = registry_client::download_tarballs_to_dir(
         &pkgs,
         &PathBuf::from(&output_dir),
         move |completed, total, current| {
@@ -764,7 +824,11 @@ async fn download_tarballs(
             );
         },
     )
-    .await
+    .await?;
+    if let Some(list) = replenishment {
+        replenishment::write_list(&PathBuf::from(&output_dir).join("replenishment.json"), &list)?;
+    }
+    Ok(summary)
 }
 
 #[tauri::command]
@@ -1098,6 +1162,10 @@ pub fn run() {
             retry_failed_tasks,
             clear_completed_tasks,
             parse_file,
+            read_dependency_file,
+            export_replenishment_list,
+            inspect_offline_bundle,
+            import_offline_bundle,
             check_install_preflight,
             resolve_package_versions,
             resolve_dependencies,

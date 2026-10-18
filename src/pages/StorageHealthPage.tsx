@@ -109,6 +109,9 @@ function describeProblem(pkg: PackageHealth): string {
   return parts.join("；");
 }
 
+import { replenishmentFromHealth } from "./replenishmentLogic";
+import { saveReplenishmentList } from "@/lib/replenishment";
+
 export function StorageHealthPage() {
   const { config, loadConfig } = useConfigStore();
   const [mode, setMode] = useState<Mode>("local");
@@ -369,6 +372,12 @@ export function StorageHealthPage() {
                 <Copy className="mr-1.5 h-3.5 w-3.5" />
                 {selected.size > 0 ? "复制选中缺失清单" : "复制缺失清单"}
               </Button>
+              <Button variant="outline" size="sm" onClick={async () => {
+                try {
+                  const source = selected.size ? packages.filter((p) => selected.has(p.name)) : packages;
+                  await saveReplenishmentList(replenishmentFromHealth(source, registryUrl || config.registry_url));
+                } catch (e) { toast.error("导出失败", { description: String(e) }); }
+              }}>导出补包清单</Button>
             </div>
           </div>
 

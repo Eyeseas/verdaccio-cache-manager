@@ -8,7 +8,9 @@ import { useConfigStore } from "@/stores/configStore";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
-import { detectImportFileKind, parseInstallCommand, type ParsedDependency } from "./importPageLogic";
+import { parseInstallCommand, type ParsedDependency } from "./importPageLogic";
+import { replenishmentFromPreflight, type DependencyFile } from "./replenishmentLogic";
+import { saveReplenishmentList } from "@/lib/replenishment";
 import { availabilityLabels, filterPreflightItems, formatPreflightMissing, type Availability, type PreflightReport } from "./installPreflightLogic";
 
 interface Progress { request_id: string; completed: number; total: number; current: string }
@@ -37,9 +39,9 @@ export function InstallPreflightPage() {
     if (typeof path !== "string") return;
     setBusy(true);
     try {
-      const deps = await invoke<ParsedDependency[]>("parse_file", { filePath: path });
-      setPackages(deps); setExpand(detectImportFileKind(path) !== "lockfile"); setSource(path); setReport(null);
-      if (!deps.length) toast.warning("未解析到依赖");
+      const file = await invoke<DependencyFile>("read_dependency_file", { filePath: path });
+      setPackages(file.dependencies); setExpand(file.kind === "manifest"); setSource(path); setReport(null);
+      if (!file.dependencies.length) toast.warning("未解析到依赖");
     } catch (e) { toast.error("解析失败", { description: String(e) }); }
     finally { setBusy(false); }
   };
@@ -91,6 +93,13 @@ export function InstallPreflightPage() {
         <Button size="sm" variant={status === "all" ? "secondary" : "ghost"} onClick={() => setStatus("all")}>全部 {report.items.length}</Button>
         {(Object.keys(availabilityLabels) as Availability[]).map((key) => <Button key={key} size="sm" variant={status === key ? "secondary" : "ghost"} onClick={() => setStatus(key)}>{availabilityLabels[key]} {report.items.filter((i) => i.status === key).length}</Button>)}
         <Button size="sm" variant="outline" onClick={copyMissing}>复制缺失清单</Button>
+        <Button size="sm" variant="outline" onClick={async () => {
+          try {
+            const { list, unresolved } = replenishmentFromPreflight(report.items, report.registry);
+            if (unresolved) toast.warning(`${unresolved} 项无法确定精确版本，请先补全范围对应的版本；本次仅导出已确定的版本`);
+            await saveReplenishmentList(list);
+          } catch (e) { toast.error("导出失败", { description: String(e) }); }
+        }}>导出补包清单</Button>
       </div>
       <p className="text-xs text-muted-foreground">{report.plugin_used ? "优先使用插件的本地 tarball 索引，索引外包使用轻量探测。" : "使用 HEAD / Range GET 探测下载地址。"}范围未能解析时仍显示原始范围；检查失败需重试。可选项是否实际安装取决于目标平台。</p>
       <Input aria-label="筛选包名" placeholder="筛选包名" value={query} onChange={(e) => setQuery(e.target.value)} />
