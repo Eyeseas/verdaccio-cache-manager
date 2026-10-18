@@ -8,6 +8,7 @@ const navItems = [
   { to: "/downgrade", icon: FileDown, label: "降级" },
   { to: "/upload", icon: Upload, label: "上传" },
   { to: "/health", icon: Stethoscope, label: "体检" },
+  { to: "/preflight", icon: FileInput, label: "预检" },
   { to: "/settings", icon: Settings, label: "设置" },
 ];
 

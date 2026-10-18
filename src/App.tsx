@@ -6,6 +6,7 @@ import { PackageJsonDowngradePage } from "./pages/PackageJsonDowngradePage";
 import { UploadPage } from "./pages/UploadPage";
 import { SettingsPage } from "./pages/SettingsPage";
 import { StorageHealthPage } from "./pages/StorageHealthPage";
+import { InstallPreflightPage } from "./pages/InstallPreflightPage";
 import { Toaster } from "./components/ui/sonner";
 
 export default function App() {
@@ -18,6 +19,7 @@ export default function App() {
           <Route path="/downgrade" element={<PackageJsonDowngradePage />} />
           <Route path="/upload" element={<UploadPage />} />
           <Route path="/health" element={<StorageHealthPage />} />
+          <Route path="/preflight" element={<InstallPreflightPage />} />
           <Route path="/settings" element={<SettingsPage />} />
         </Route>
       </Routes>

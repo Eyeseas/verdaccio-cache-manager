@@ -1,6 +1,7 @@
 pub mod cache_db;
 pub mod config;
 pub mod dependency_resolver;
+pub mod install_preflight;
 pub mod local_scanner;
 pub mod node_env;
 pub mod package_downgrade;
@@ -477,6 +478,27 @@ async fn persist_initial_task_batch(
 async fn parse_file(file_path: String) -> Result<Vec<ParsedDependency>, String> {
     let path = PathBuf::from(&file_path);
     parser::detect_and_parse(&path)
+}
+
+#[tauri::command]
+async fn check_install_preflight(
+    app_handle: tauri::AppHandle,
+    packages: Vec<ParsedDependency>,
+    registry_url: String,
+    expand_dependencies: bool,
+    request_id: String,
+) -> Result<install_preflight::PreflightReport, String> {
+    use tauri::Emitter;
+    let node = resolve_node_version(&app_handle).await;
+    let mut last_emit = std::time::Instant::now();
+    install_preflight::check_install(packages, &registry_url, expand_dependencies, node, |completed, total, current| {
+        if completed == total || last_emit.elapsed().as_millis() >= 100 {
+            let _ = app_handle.emit("install-preflight-progress", install_preflight::PreflightProgress {
+                request_id: request_id.clone(), completed, total, current: current.into(),
+            });
+            last_emit = std::time::Instant::now();
+        }
+    }).await
 }
 
 #[derive(serde::Serialize, Clone)]
@@ -1076,6 +1098,7 @@ pub fn run() {
             retry_failed_tasks,
             clear_completed_tasks,
             parse_file,
+            check_install_preflight,
             resolve_package_versions,
             resolve_dependencies,
             scan_node_modules,

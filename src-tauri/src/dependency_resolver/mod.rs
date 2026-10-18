@@ -57,12 +57,12 @@ impl VisitState {
 }
 
 /// 从 version 元数据提取出的一条依赖声明。
-struct DepSpec {
-    name: String,
+pub(crate) struct DepSpec {
+    pub(crate) name: String,
     /// 版本范围（semver range），非已解析的具体版本。
-    range: String,
+    pub(crate) range: String,
     /// 是否为可选依赖（声明于 optionalDependencies，或被同名 optional 覆盖）。
-    optional: bool,
+    pub(crate) optional: bool,
 }
 
 /// BFS 待处理节点。`range` 为版本范围（根包为精确版本）；`optional_ctx`
@@ -287,7 +287,7 @@ where
 /// 的版本范围，且安装失败可继续）。
 /// peerDependencies 也纳入（npm 7+ 会自动安装 peer），按 optional 处理：
 /// best-effort 解析，失败不阻断整体，且不覆盖同名的 regular/optional 声明。
-fn extract_deps(body: &serde_json::Value) -> Vec<DepSpec> {
+pub(crate) fn extract_deps(body: &serde_json::Value) -> Vec<DepSpec> {
     let mut map: HashMap<String, (String, bool)> = HashMap::new();
     if let Some(obj) = body["dependencies"].as_object() {
         for (k, v) in obj {
