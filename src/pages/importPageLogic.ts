@@ -298,7 +298,7 @@ export const shouldShowActionBar = (state: {
 }) =>
   state.selectedSize > 0 || state.resolving || state.caching || state.exporting;
 
-export type ImportFileKind = "manifest" | "lockfile";
+export type ImportFileKind = "manifest" | "lockfile" | "replenishment";
 
 const LOCKFILE_NAMES = ["package-lock.json", "pnpm-lock.yaml"];
 
@@ -317,7 +317,7 @@ export const detectImportFileKind = (filePath: string): ImportFileKind =>
 export const allowDependencyExpansion = (
   source: "file" | "command",
   kind: ImportFileKind | null
-): boolean => source === "command" || kind !== "lockfile";
+): boolean => source === "command" || (kind !== "lockfile" && kind !== "replenishment");
 
 export const getRowState = (
   states: Map<string, RowState>,

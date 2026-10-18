@@ -498,7 +498,10 @@ async fn execute_publish(
         }
     } else if tarball_url.starts_with("file://") {
         let file_path = &tarball_url[7..];
-        match std::fs::read(file_path) {
+        match std::fs::read(file_path).map_err(|e| e.to_string()).and_then(|data| {
+            crate::offline_bundle::validate_selected_file(std::path::Path::new(file_path), &data)?;
+            Ok(data)
+        }) {
             Ok(data) => data,
             Err(e) => {
                 update_task_status(
@@ -765,11 +768,19 @@ async fn execute_publish(
 }
 
 /// 推进 latest 失败不影响上传结果：tarball 已落盘，体检页可再修正 dist-tags。
-async fn promote_latest_best_effort(
-    client: &RegistryClient,
-    task: &CacheTask,
-    timeout_secs: u64,
-) {
+async fn promote_latest_best_effort(client: &RegistryClient, task: &CacheTask, timeout_secs: u64) {
+    if let Some(path) = task
+        .tarball_url
+        .as_deref()
+        .and_then(|url| url.strip_prefix("file://"))
+    {
+        if std::path::Path::new(path)
+            .parent()
+            .is_some_and(|dir| dir.join("manifest.json").exists())
+        {
+            return;
+        }
+    }
     let _ = tokio::time::timeout(
         Duration::from_secs(timeout_secs),
         client.promote_latest(&task.package_name, &task.version),
@@ -777,7 +788,7 @@ async fn promote_latest_best_effort(
     .await;
 }
 
-fn extract_package_json_from_tarball(tarball_data: &[u8]) -> Result<serde_json::Value, String> {
+pub(crate) fn extract_package_json_from_tarball(tarball_data: &[u8]) -> Result<serde_json::Value, String> {
     use flate2::read::GzDecoder;
     use std::io::Read;
     use tar::Archive;

@@ -74,7 +74,7 @@ pub fn parse_package_json(content: &str) -> Result<Vec<ParsedDependency>, String
 
 fn clean_semver_range(raw: &str) -> Option<String> {
     let trimmed = raw.trim();
-    if trimmed.is_empty() || trimmed == "*" || trimmed == "latest" {
+    if trimmed.is_empty() {
         return None;
     }
     // Reject non-semver specifiers (git/file/url/workspace/link/npm alias)
@@ -524,6 +524,14 @@ pub async fn fetch_versions(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn package_json_preserves_star_and_latest_for_registry_selection() {
+        let dependencies = parse_package_json(r#"{"dependencies":{"a":"*","b":"latest"}}"#).unwrap();
+        assert_eq!(dependencies.len(), 2);
+        assert!(dependencies.iter().any(|d| d.name == "a" && d.version == "*"));
+        assert!(dependencies.iter().any(|d| d.name == "b" && d.version == "latest"));
+    }
 
     fn meta(versions: &[&str], tags: &[(&str, &str)]) -> PackageVersions {
         PackageVersions {

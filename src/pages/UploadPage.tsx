@@ -2,6 +2,11 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
+import { OfflineBundleTab } from "./OfflineBundleTab";
+import { useNavigate } from "react-router-dom";
+import { useConfigStore } from "@/stores/configStore";
+import { summarizeLatest, type BundleCompletion } from "./offlineBundleLogic";
+import { summarizeVerification } from "./replenishmentLogic";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { useTaskStore } from "@/stores/taskStore";
 import { useCacheStore } from "@/stores/cacheStore";
@@ -60,12 +65,16 @@ export function UploadPage() {
         <TabsList className="w-fit">
           <TabsTrigger value="scan">扫描 node_modules</TabsTrigger>
           <TabsTrigger value="tgz">上传 .tgz</TabsTrigger>
+          <TabsTrigger value="offline">导入离线包目录</TabsTrigger>
         </TabsList>
         <TabsContent value="scan" className="flex min-h-0 flex-1 flex-col">
           <ScanTab />
         </TabsContent>
         <TabsContent value="tgz" className="flex min-h-0 flex-1 flex-col">
           <TgzTab />
+        </TabsContent>
+        <TabsContent value="offline" className="flex min-h-0 flex-1 flex-col">
+          <OfflineBundleTab />
         </TabsContent>
       </Tabs>
     </div>
@@ -541,6 +550,9 @@ function statusBadge(status: UploadStatus, error?: string) {
 
 function TgzTab() {
   const { startCacheTasks } = useTaskStore();
+  const navigate = useNavigate();
+  const [completion, setCompletion] = useState<BundleCompletion | null>(null);
+  const [finalizing, setFinalizing] = useState(false);
   const [files, setFiles] = useState<TgzFileWithStatus[]>([]);
   const [loading, setLoading] = useState(false);
   const [uploading, setUploading] = useState(false);
@@ -555,6 +567,12 @@ function TgzTab() {
       unlistenRef.current?.();
       unlistenRef.current = null;
       setUploading(false);
+      setFinalizing(true);
+      void invoke<BundleCompletion>("finalize_offline_upload", {
+        filePaths: files.map((file) => file.path), registryUrl: useConfigStore.getState().config.registry_url,
+      }).then(setCompletion)
+        .catch((error) => setCompletion({ latest: [], verification: [], errors: [String(error)] }))
+        .finally(() => setFinalizing(false));
     }
   }, [files, uploading]);
 
@@ -570,6 +588,7 @@ function TgzTab() {
   };
 
   const parseTgzFiles = async (paths: string[]) => {
+    setCompletion(null);
     setLoading(true);
     try {
       const parsed: TgzFileWithStatus[] = [];
@@ -587,6 +606,7 @@ function TgzTab() {
 
   const handleUpload = async () => {
     setUploading(true);
+    setCompletion(null);
     setFiles((prev) =>
       prev.map((f) => ({ ...f, uploadStatus: "Pending" as UploadStatus }))
     );
@@ -630,6 +650,7 @@ function TgzTab() {
   const handleReset = () => {
     setFiles([]);
     setUploading(false);
+    setCompletion(null);
   };
 
   if (loading) {
@@ -665,7 +686,7 @@ function TgzTab() {
   const doneCount = files.filter(
     (f) => f.uploadStatus === "Success" || f.uploadStatus === "Skipped"
   ).length;
-  const allDone = uploading && doneCount === files.length;
+  const allDone = !uploading && files.every((file) => ["Success", "Skipped", "Failed"].includes(file.uploadStatus));
 
   return (
     <div className="flex min-h-0 flex-1 flex-col pt-3">
@@ -674,12 +695,21 @@ function TgzTab() {
           已解析 {files.length} 个 tarball
           {uploading && ` · 已完成 ${doneCount}/${files.length}`}
         </span>
-        {!uploading && (
+        {!uploading && !finalizing && (
           <Button variant="outline" size="sm" onClick={handleSelectFiles}>
             添加更多
           </Button>
         )}
       </div>
+
+      {finalizing && <p role="status" className="mb-3 text-sm">正在核对补包清单与 latest…</p>}
+      {completion && <div className="mb-3 space-y-1 rounded-md border p-3 text-sm">
+        {completion.latest.length > 0 && <p>{summarizeLatest(completion.latest)}</p>}
+        {completion.latest.filter((item) => item.message).map((item) => <p key={item.name}>{item.name}：期望 {item.expected_latest}，实际 {item.actual_latest ?? "未确认"}；{item.message}</p>)}
+        {completion.verification.map((report) => <p key={report.registry}>{summarizeVerification(report.items)}</p>)}
+        {completion.errors.map((error, index) => <p key={index} className="text-destructive">{error}</p>)}
+        {(completion.latest.length > 0 || completion.verification.length > 0 || completion.errors.length > 0) && <Button size="sm" variant="outline" onClick={() => navigate("/health")}>前往仓库体检</Button>}
+      </div>}
 
       <ScrollArea className="min-h-0 flex-1 rounded-md border">
         <div className="divide-y">
@@ -704,12 +734,12 @@ function TgzTab() {
           共 <strong>{files.length}</strong> 个包
         </span>
         <div className="flex gap-2">
-          {allDone && (
+          {allDone && !finalizing && (
             <Button variant="outline" onClick={handleReset}>
               重新选择
             </Button>
           )}
-          <Button onClick={handleUpload} disabled={uploading}>
+          <Button onClick={handleUpload} disabled={uploading || finalizing}>
             {uploading ? (
               <>
                 <Loader2 className="mr-2 h-4 w-4 animate-spin" />
