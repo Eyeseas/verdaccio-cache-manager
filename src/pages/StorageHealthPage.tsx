@@ -122,6 +122,7 @@ export function StorageHealthPage() {
   const [outcomes, setOutcomes] = useState<Map<string, RepairOutcome>>(new Map());
   const [query, setQuery] = useState("");
   const listRef = useRef<HTMLDivElement>(null);
+  const registryDefaultRef = useRef(config.registry_url);
   const scanning = busy && !repairing;
 
   useEffect(() => {
@@ -139,10 +140,10 @@ export function StorageHealthPage() {
   }, [config.verdaccio_storage_path, storagePath]);
 
   useEffect(() => {
-    if (!registryUrl && config.registry_url) {
-      setRegistryUrl(config.registry_url);
-    }
-  }, [config.registry_url, registryUrl]);
+    const previousDefault = registryDefaultRef.current;
+    registryDefaultRef.current = config.registry_url;
+    setRegistryUrl((current) => !current || current === previousDefault ? config.registry_url : current);
+  }, [config.registry_url]);
 
   const target = mode === "local" ? storagePath : registryUrl;
   const currentSnapshot = latest?.mode === mode && latest.value === target.trim() ? latest : null;
@@ -350,7 +351,7 @@ export function StorageHealthPage() {
             </>
           )}
         </div>
-      ) : report.unhealthy.length === 0 && !report.plugin_outdated ? (
+      ) : report.unhealthy.length === 0 && report.unreadable.length === 0 && !report.plugin_outdated ? (
         <div className="flex flex-1 flex-col items-center justify-center rounded-lg border p-12 text-center">
           <ShieldCheck className="mb-4 h-12 w-12 text-green-600" />
           <p className="mb-2 text-lg font-medium">一切正常</p>
