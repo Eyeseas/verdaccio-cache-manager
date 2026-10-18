@@ -50,7 +50,8 @@ vi.mock("@tauri-apps/plugin-updater", () => ({ check }));
 vi.mock("@tauri-apps/plugin-process", () => ({ relaunch }));
 vi.mock("sonner", () => ({ toast }));
 
-vi.mock("@/stores/configStore", () => ({
+vi.mock("@/stores/configStore", async (importOriginal) => ({
+  ...await importOriginal<object>(),
   useConfigStore: () => ({
     config,
     loadConfig,
@@ -83,6 +84,17 @@ describe("SettingsPage Verdaccio plugin export", () => {
     testConnection.mockReset();
     startSync.mockReset();
     clearIndex.mockReset();
+  });
+
+  it("saves automatic health preferences with the other settings", async () => {
+    render(<SettingsPage />);
+    fireEvent.click(screen.getByRole("checkbox", { name: "启动时自动体检" }));
+    fireEvent.change(screen.getByLabelText("体检模式"), { target: { value: "remote" } });
+    fireEvent.change(screen.getByLabelText("定时体检"), { target: { value: "60" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存配置" }));
+    await waitFor(() => expect(saveConfig).toHaveBeenCalledWith(expect.objectContaining({
+      health_check: { on_startup: true, interval_minutes: 60, mode: "remote" },
+    })));
   });
 
   it("opens a save dialog with the bundled plugin tarball name", async () => {

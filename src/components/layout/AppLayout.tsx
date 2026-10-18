@@ -3,8 +3,10 @@ import { Outlet } from "react-router-dom";
 import { useSyncStore } from "@/stores/syncStore";
 import { Sidebar } from "./Sidebar";
 import { TaskBar } from "./TaskBar";
+import { useAutomaticHealthChecks } from "@/hooks/useAutomaticHealthChecks";
 
 export function AppLayout() {
+  useAutomaticHealthChecks();
   const syncStartListening = useSyncStore((s) => s.startListening);
   const syncGetInfo = useSyncStore((s) => s.getSyncInfo);
 

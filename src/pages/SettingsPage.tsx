@@ -4,11 +4,12 @@ import { open, save } from "@tauri-apps/plugin-dialog";
 import { getVersion } from "@tauri-apps/api/app";
 import { check } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
-import { useConfigStore } from "@/stores/configStore";
+import { DEFAULT_HEALTH_CHECK, useConfigStore } from "@/stores/configStore";
 import { useSyncStore } from "@/stores/syncStore";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Checkbox } from "@/components/ui/checkbox";
 import {
   Card,
   CardContent,
@@ -51,6 +52,7 @@ export function SettingsPage() {
   const [version, setVersion] = useState("");
   const [checking, setChecking] = useState(false);
   const [exportingPlugin, setExportingPlugin] = useState(false);
+  const healthCheck = form.health_check ?? DEFAULT_HEALTH_CHECK;
 
   useEffect(() => {
     loadConfig();
@@ -148,7 +150,9 @@ export function SettingsPage() {
     form.retry_count !== config.retry_count ||
     form.timeout_secs !== config.timeout_secs ||
     form.verdaccio_storage_path !== config.verdaccio_storage_path ||
-    form.target_node_version !== config.target_node_version;
+    form.target_node_version !== config.target_node_version ||
+    JSON.stringify(form.health_check ?? DEFAULT_HEALTH_CHECK) !==
+      JSON.stringify(config.health_check ?? DEFAULT_HEALTH_CHECK);
 
   return (
     <div className="h-full overflow-y-auto p-6">
@@ -282,6 +286,45 @@ export function SettingsPage() {
                 {exportingPlugin ? "导出中" : "导出插件包"}
               </Button>
             </div>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle>自动体检</CardTitle>
+            <CardDescription>后台仅检查，不自动修复。发现问题后在侧边栏提示，结果可在体检页查看。</CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="flex items-center gap-2">
+              <Checkbox id="health_on_startup" checked={healthCheck.on_startup}
+                onCheckedChange={(checked) => setForm({ ...form, health_check: { ...healthCheck, on_startup: checked === true } })} />
+              <Label htmlFor="health_on_startup">启动时自动体检</Label>
+            </div>
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-2">
+                <Label htmlFor="health_mode">体检模式</Label>
+                <select id="health_mode" className="h-9 w-full rounded-md border bg-background px-3 text-sm"
+                  value={healthCheck.mode}
+                  onChange={(e) => setForm({ ...form, health_check: { ...healthCheck, mode: e.target.value === "remote" ? "remote" : "local" } })}>
+                  <option value="local">本地目录</option>
+                  <option value="remote">远程插件</option>
+                </select>
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="health_interval">定时体检</Label>
+                <select id="health_interval" className="h-9 w-full rounded-md border bg-background px-3 text-sm"
+                  value={healthCheck.interval_minutes}
+                  onChange={(e) => setForm({ ...form, health_check: { ...healthCheck, interval_minutes: Number(e.target.value) } })}>
+                  <option value={0}>关闭</option>
+                  <option value={30}>每 30 分钟</option>
+                  <option value={60}>每 1 小时</option>
+                  <option value={360}>每 6 小时</option>
+                </select>
+              </div>
+            </div>
+            <p className="text-xs text-muted-foreground">
+              本地模式使用上方 Storage 路径，远程模式使用 Registry 地址并需要 cached-list 插件。未配置目标时跳过；定时体检仅在应用运行时执行。
+            </p>
           </CardContent>
         </Card>
 
