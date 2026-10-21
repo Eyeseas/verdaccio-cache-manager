@@ -7,6 +7,8 @@ export interface CachedPackage {
   latest_version: string | null;
   versions: string[];
   cached_versions: string[];
+  /** 有 tarball 但元数据未登记的版本，npm 不可见；旧索引可能缺失该字段 */
+  orphan_versions?: string[];
 }
 
 export type CacheSource = "db" | "none";

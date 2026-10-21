@@ -2,6 +2,8 @@ export interface PackageHealth {
   name: string;
   missing_versions: string[];
   cached_versions: string[];
+  /** 有 tarball 但元数据未登记的版本，npm 不可见 */
+  orphan_versions: string[];
   latest: string | null;
   expected_latest: string | null;
   latest_missing: boolean;
@@ -21,6 +23,7 @@ export interface RepairOutcome {
   name: string;
   action: RepairAction;
   removed_versions: string[];
+  registered_versions: string[];
   previous_latest: string | null;
   new_latest: string | null;
   backup_path: string | null;
@@ -44,8 +47,11 @@ export function summarizeRepair(outcomes: RepairOutcome[]) {
   const fixed = outcomes.filter((o) => o.action === "repaired");
   const versions = fixed.reduce((n, o) => n + o.removed_versions.length, 0);
   const latestMoved = fixed.filter((o) => o.new_latest).length;
+  const registered = fixed.reduce((n, o) => n + o.registered_versions.length, 0);
 
-  const parts = [`修复 ${repaired} 个包（剔除 ${versions} 个版本，修正 ${latestMoved} 个 latest）`];
+  const detail = [`剔除 ${versions} 个版本`, `修正 ${latestMoved} 个 latest`];
+  if (registered > 0) detail.unshift(`登记 ${registered} 个孤儿版本`);
+  const parts = [`修复 ${repaired} 个包（${detail.join("，")}）`];
   if (removed > 0) parts.push(`移除 ${removed} 个无 tarball 的包`);
   if (skipped > 0) parts.push(`跳过 ${skipped} 个`);
   if (failed > 0) {

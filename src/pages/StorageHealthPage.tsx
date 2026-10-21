@@ -38,6 +38,7 @@ function outcomeBadge(outcome: RepairOutcome) {
           title={outcome.backup_path ?? undefined}
         >
           {[
+            outcome.registered_versions.length > 0 && `登记 ${outcome.registered_versions.length} 个`,
             outcome.removed_versions.length > 0 && `剔除 ${outcome.removed_versions.length} 个`,
             outcome.new_latest && `latest → ${outcome.new_latest}`,
           ]
@@ -67,7 +68,24 @@ function outcomeBadge(outcome: RepairOutcome) {
 }
 
 function healthBadges(pkg: PackageHealth) {
-  if (pkg.cached_versions.length === 0) {
+  const status = statusBadge(pkg);
+  if (pkg.orphan_versions.length === 0) return status;
+  return (
+    <>
+      <Badge
+        variant="outline"
+        className="border-amber-300 text-amber-600"
+        title="tarball 已在 storage 中，但元数据未登记，npm 安装时报版本不存在"
+      >
+        {pkg.orphan_versions.length} 个未登记
+      </Badge>
+      {status}
+    </>
+  );
+}
+
+function statusBadge(pkg: PackageHealth) {
+  if (pkg.cached_versions.length === 0 && pkg.orphan_versions.length === 0) {
     return (
       <Badge variant="outline" className="border-red-300 text-red-600">
         无 tarball
@@ -99,6 +117,9 @@ const REMOTE_REPAIR_NOTICE =
 
 function describeProblem(pkg: PackageHealth): string {
   const parts: string[] = [];
+  if (pkg.orphan_versions.length > 0) {
+    parts.push(`未登记：${pkg.orphan_versions.join(", ")}`);
+  }
   if (pkg.latest_stale) {
     parts.push(`latest ${pkg.latest ?? "无"} → ${pkg.expected_latest}`);
   }
@@ -229,7 +250,7 @@ export function StorageHealthPage() {
     const names = [...selected];
     if (names.length === 0) return;
     const confirmed = await ask(
-      `将修改 ${names.length} 个包的元数据：剔除没有 tarball 的版本，并把 dist-tags.latest 改为本地可用的最高正式版；完全没有 tarball 的包会移除其元数据。\n\n${mode === "local" ? LOCAL_REPAIR_NOTICE : REMOTE_REPAIR_NOTICE}\n\n仅适用于离线 Verdaccio：若 uplink 仍可访问，元数据会被重新合并回来。`,
+      `将修改 ${names.length} 个包的元数据：登记已有 tarball 但未登记的版本，剔除没有 tarball 的版本，并把 dist-tags.latest 改为本地可用的最高正式版；完全没有 tarball 的包会移除其元数据。\n\n${mode === "local" ? LOCAL_REPAIR_NOTICE : REMOTE_REPAIR_NOTICE}\n\n仅适用于离线 Verdaccio：若 uplink 仍可访问，元数据会被重新合并回来。`,
       { title: "确认修复", kind: "warning", okLabel: "修复", cancelLabel: "取消" },
     );
     if (!confirmed) return;
@@ -271,7 +292,7 @@ export function StorageHealthPage() {
       <div className="mb-4">
         <h1 className="text-2xl font-bold">仓库体检</h1>
         <p className="mt-1 text-sm text-muted-foreground">
-          检查 Verdaccio storage 中「元数据有、tarball 无」的版本，以及过时的 dist-tags.latest。npm 只要 latest 满足范围就优先选它，离线环境下选中无 tarball 的版本会返回 500 导致缺包。
+          检查 Verdaccio storage 中「元数据有、tarball 无」与「tarball 有、元数据未登记」的版本，以及过时的 dist-tags.latest。npm 只要 latest 满足范围就优先选它，离线环境下选中无 tarball 的版本会返回 500 导致缺包。
         </p>
       </div>
 
@@ -446,7 +467,7 @@ export function StorageHealthPage() {
                         <div className="truncate font-mono text-sm">{pkg.name}</div>
                         <div
                           className="truncate text-xs text-muted-foreground"
-                          title={pkg.missing_versions.join(", ")}
+                          title={[...pkg.orphan_versions, ...pkg.missing_versions].join(", ")}
                         >
                           {describeProblem(pkg)}
                         </div>

@@ -5,6 +5,7 @@ pub mod install_preflight;
 pub mod local_scanner;
 pub mod node_env;
 pub mod offline_bundle;
+pub mod orphan_repair;
 pub mod package_downgrade;
 pub mod parser;
 pub mod registry_client;
@@ -162,11 +163,13 @@ async fn repair_remote_storage_packages(
 
 #[tauri::command]
 async fn repair_storage_packages(
+    app_handle: tauri::AppHandle,
     storage_path: String,
     names: Vec<String>,
 ) -> Result<Vec<storage_health::RepairOutcome>, String> {
     let path = PathBuf::from(&storage_path);
-    tokio::task::spawn_blocking(move || storage_health::repair_packages(&path, &names))
+    let registry_url = config::load_config(&app_handle).registry_url;
+    tokio::task::spawn_blocking(move || storage_health::repair_packages(&path, &names, &registry_url))
         .await
         .map_err(|e| e.to_string())?
 }
@@ -1074,6 +1077,40 @@ async fn unpublish_package(
     Ok(())
 }
 
+#[derive(serde::Serialize)]
+struct OrphanRepairResult {
+    version: String,
+    error: Option<String>,
+}
+
+/// 登记单个包的孤儿版本（有 tarball 但元数据未登记），成功的版本同步进本地索引。
+#[tauri::command]
+async fn repair_orphan_versions(
+    app_handle: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    name: String,
+    versions: Vec<String>,
+) -> Result<Vec<OrphanRepairResult>, String> {
+    let config = config::load_config(&app_handle);
+    let client = registry_client::RegistryClient::new(&config.registry_url);
+    let mut results = Vec::with_capacity(versions.len());
+    let mut registered = Vec::new();
+    for version in versions {
+        let error = orphan_repair::repair_from_registry(&client, &name, &version)
+            .await
+            .err();
+        if error.is_none() {
+            let _ = client.promote_latest(&name, &version).await;
+            registered.push(version.clone());
+        }
+        results.push(OrphanRepairResult { version, error });
+    }
+    if !registered.is_empty() {
+        state.cache_db.lock().await.mark_registered(&name, &registered)?;
+    }
+    Ok(results)
+}
+
 #[tauri::command]
 async fn deprecate_package(
     app_handle: tauri::AppHandle,
@@ -1305,6 +1342,7 @@ pub fn run() {
             download_tarballs,
             unpublish_package,
             deprecate_package,
+            repair_orphan_versions,
             export_verdaccio_plugin,
             get_verdaccio_plugin_info,
             check_storage_health,

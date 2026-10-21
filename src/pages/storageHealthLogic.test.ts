@@ -11,6 +11,7 @@ const pkg = (name: string, missing: string[]): PackageHealth => ({
   name,
   missing_versions: missing,
   cached_versions: ["1.0.0"],
+  orphan_versions: [],
   latest: null,
   expected_latest: null,
   latest_missing: false,
@@ -27,6 +28,7 @@ const outcome = (
   name,
   action,
   removed_versions: removed,
+  registered_versions: [],
   previous_latest: null,
   new_latest: newLatest,
   backup_path: null,
@@ -57,5 +59,12 @@ describe("summarizeRepair", () => {
       summary.text,
       "修复 2 个包（剔除 2 个版本，修正 2 个 latest），移除 1 个无 tarball 的包，失败 1 个（c: 读取 package.json 失败）",
     );
+  });
+
+  it("mentions registered orphan versions only when there are any", () => {
+    const summary = summarizeRepair([
+      { ...outcome("ansi-styles", "repaired", [], null, "4.3.0"), registered_versions: ["4.3.0"] },
+    ]);
+    assert.equal(summary.text, "修复 1 个包（登记 1 个孤儿版本，剔除 0 个版本，修正 1 个 latest）");
   });
 });

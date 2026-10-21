@@ -105,6 +105,11 @@ impl CacheDb {
                     version TEXT NOT NULL,
                     PRIMARY KEY (package_name, version)
                 );
+                CREATE TABLE IF NOT EXISTS orphan_versions (
+                    package_name TEXT NOT NULL,
+                    version TEXT NOT NULL,
+                    PRIMARY KEY (package_name, version)
+                );
                 CREATE TABLE IF NOT EXISTS sync_metadata (
                     key TEXT PRIMARY KEY,
                     value TEXT NOT NULL
@@ -159,6 +164,8 @@ impl CacheDb {
 
         tx.execute("DELETE FROM cached_versions", [])
             .map_err(|e| format!("清空 cached_versions 失败: {}", e))?;
+        tx.execute("DELETE FROM orphan_versions", [])
+            .map_err(|e| format!("清空 orphan_versions 失败: {}", e))?;
         tx.execute("DELETE FROM packages", [])
             .map_err(|e| format!("清空 packages 失败: {}", e))?;
 
@@ -175,6 +182,13 @@ impl CacheDb {
                     params![pkg.name, ver],
                 )
                 .map_err(|e| format!("插入 cached_version 失败: {}", e))?;
+            }
+            for ver in &pkg.orphan_versions {
+                tx.execute(
+                    "INSERT OR IGNORE INTO orphan_versions (package_name, version) VALUES (?1, ?2)",
+                    params![pkg.name, ver],
+                )
+                .map_err(|e| format!("插入 orphan_version 失败: {}", e))?;
             }
 
             if (i + 1) % 50 == 0 || i + 1 == total {
@@ -216,6 +230,10 @@ impl CacheDb {
             .conn
             .prepare("SELECT version FROM cached_versions WHERE package_name = ?1")
             .map_err(|e| format!("准备 cached_versions 查询失败: {}", e))?;
+        let mut orphan_stmt = self
+            .conn
+            .prepare("SELECT version FROM orphan_versions WHERE package_name = ?1")
+            .map_err(|e| format!("准备 orphan_versions 查询失败: {}", e))?;
 
         let packages = pkg_stmt
             .query_map([], |row| {
@@ -237,6 +255,11 @@ impl CacheDb {
                 .map_err(|e| format!("查询版本失败: {}", e))?
                 .filter_map(|r| r.ok())
                 .collect();
+            let orphan_versions: Vec<String> = orphan_stmt
+                .query_map(params![&name], |row| row.get(0))
+                .map_err(|e| format!("查询版本失败: {}", e))?
+                .filter_map(|r| r.ok())
+                .collect();
 
             results.push(SearchResult {
                 name,
@@ -244,6 +267,7 @@ impl CacheDb {
                 latest_version,
                 versions: cached_versions.clone(),
                 cached_versions,
+                orphan_versions,
             });
         }
         Ok(results)
@@ -400,6 +424,11 @@ impl CacheDb {
                 )
                 .map_err(|e| format!("删除版本失败: {}", e))?;
                 tx.execute(
+                    "DELETE FROM orphan_versions WHERE package_name = ?1",
+                    params![name],
+                )
+                .map_err(|e| format!("删除版本失败: {}", e))?;
+                tx.execute(
                     "DELETE FROM packages WHERE name = ?1",
                     params![name],
                 )
@@ -415,7 +444,8 @@ impl CacheDb {
                 }
                 let remaining: i64 = tx
                     .query_row(
-                        "SELECT COUNT(*) FROM cached_versions WHERE package_name = ?1",
+                        "SELECT (SELECT COUNT(*) FROM cached_versions WHERE package_name = ?1)
+                              + (SELECT COUNT(*) FROM orphan_versions WHERE package_name = ?1)",
                         params![name],
                         |row| row.get(0),
                     )
@@ -430,6 +460,27 @@ impl CacheDb {
             }
         }
 
+        tx.commit().map_err(|e| format!("提交事务失败: {}", e))
+    }
+
+    /// 孤儿版本修复成功后转入已缓存。
+    pub fn mark_registered(&self, name: &str, versions: &[String]) -> Result<(), String> {
+        let tx = self
+            .conn
+            .unchecked_transaction()
+            .map_err(|e| format!("开启事务失败: {}", e))?;
+        for ver in versions {
+            tx.execute(
+                "DELETE FROM orphan_versions WHERE package_name = ?1 AND version = ?2",
+                params![name, ver],
+            )
+            .map_err(|e| format!("更新版本失败: {}", e))?;
+            tx.execute(
+                "INSERT OR IGNORE INTO cached_versions (package_name, version) VALUES (?1, ?2)",
+                params![name, ver],
+            )
+            .map_err(|e| format!("更新版本失败: {}", e))?;
+        }
         tx.commit().map_err(|e| format!("提交事务失败: {}", e))
     }
 
@@ -690,6 +741,7 @@ mod tests {
             latest_version: versions.last().map(|s| s.to_string()),
             versions: versions.iter().map(|s| s.to_string()).collect(),
             cached_versions: versions.iter().map(|s| s.to_string()).collect(),
+            orphan_versions: vec![],
         }
     }
 
@@ -729,6 +781,24 @@ mod tests {
             .unwrap();
 
         assert!(db.get_all_packages().unwrap().is_empty());
+    }
+
+    #[test]
+    fn orphans_are_kept_apart_and_promoted_once_registered() {
+        let (_d, db) = fresh_db();
+        let mut left = pkg("left-pad", &["1.0.0"]);
+        left.orphan_versions = vec!["2.0.0".to_string()];
+        db.replace_all(&[left]).unwrap();
+
+        let found = db.get_all_packages().unwrap();
+        assert_eq!(found[0].cached_versions, vec!["1.0.0"]);
+        assert_eq!(found[0].orphan_versions, vec!["2.0.0"]);
+        assert!(!db.check_cached(&[("left-pad".into(), "2.0.0".into())]).unwrap()[0].cached);
+
+        db.mark_registered("left-pad", &["2.0.0".to_string()]).unwrap();
+        let found = db.get_all_packages().unwrap();
+        assert!(found[0].orphan_versions.is_empty());
+        assert!(db.check_cached(&[("left-pad".into(), "2.0.0".into())]).unwrap()[0].cached);
     }
 
     #[test]

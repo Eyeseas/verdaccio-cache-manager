@@ -227,7 +227,7 @@ async fn real_verdaccio_health_and_repairs() {
         check_storage(local_storage.path()).unwrap().unhealthy.len(),
         6
     );
-    let outcomes = repair_packages(local_storage.path(), &names).unwrap();
+    let outcomes = repair_packages(local_storage.path(), &names, &url).unwrap();
     for (outcome, original) in outcomes.iter().zip(originals) {
         let manifest = local_storage
             .path()
@@ -254,4 +254,48 @@ async fn real_verdaccio_health_and_repairs() {
         .unhealthy
         .is_empty());
     println!("[e2e] local repair healthy; all 6 .bak backups preserve original metadata");
+
+    // Orphan tarball: the file lands in storage but the packument never registers it,
+    // as left behind by concurrent publishes of one package.
+    let orphan = "vcm-e2e-orphan";
+    client
+        .publish_package(
+            orphan,
+            "1.0.0",
+            json!({"name": orphan, "version": "1.0.0"}),
+            &archive(orphan, "1.0.0"),
+        )
+        .await
+        .unwrap();
+    std::fs::write(
+        storage.join(orphan).join(format!("{orphan}-3.0.0.tgz")),
+        archive(orphan, "3.0.0"),
+    )
+    .unwrap();
+    let listed = client.list_cached_via_plugin().await.unwrap();
+    let entry = listed.iter().find(|p| p.name == orphan).unwrap();
+    assert_eq!(entry.cached_versions, vec!["1.0.0"]);
+    assert_eq!(entry.orphan_versions, vec!["3.0.0"]);
+    let report = check_remote(&client).await.unwrap();
+    assert_eq!(report.unhealthy.len(), 1);
+    assert_eq!(report.unhealthy[0].orphan_versions, vec!["3.0.0"]);
+    let outcomes = repair_remote(&client, report.unhealthy).await;
+    assert_eq!(outcomes[0].action, RepairAction::Repaired, "{outcomes:?}");
+    assert_eq!(outcomes[0].registered_versions, vec!["3.0.0"]);
+    let doc: Value = http
+        .get(format!("{url}/{orphan}"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(doc["dist-tags"]["latest"], "3.0.0");
+    let tarball = doc["versions"]["3.0.0"]["dist"]["tarball"].as_str().unwrap();
+    for url in [tarball.to_string(), tarball_url(&url, orphan, "3.0.0")] {
+        let bytes = http.get(&url).send().await.unwrap().error_for_status().unwrap().bytes().await.unwrap();
+        assert_eq!(bytes.as_ref(), archive(orphan, "3.0.0"), "{url}");
+    }
+    assert!(check_remote(&client).await.unwrap().unhealthy.is_empty());
+    println!("[e2e] orphan tarball detected, registered via API; metadata and original URLs both serve it");
 }

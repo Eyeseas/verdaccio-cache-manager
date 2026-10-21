@@ -1,6 +1,4 @@
-use base64::Engine as _;
 use serde::{Deserialize, Serialize};
-use sha1::Digest as _;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
@@ -595,37 +593,12 @@ async fn execute_publish(
     )
     .await;
 
-    let shasum = sha1::Sha1::digest(&tarball_data)
-        .iter()
-        .map(|b| format!("{:02x}", b))
-        .collect::<String>();
-    let integrity = format!(
-        "sha512-{}",
-        base64::engine::general_purpose::STANDARD.encode(sha2::Sha512::digest(&tarball_data))
+    let metadata = crate::orphan_repair::version_metadata(
+        &task.package_name,
+        &task.version,
+        &tarball_data,
+        crate::registry_client::tarball_url(&target_client.registry_url, &task.package_name, &task.version),
     );
-
-    // Extract full package.json from tarball to preserve dependencies metadata
-    let mut metadata = match extract_package_json_from_tarball(&tarball_data) {
-        Ok(mut pkg) => {
-            if let Some(obj) = pkg.as_object_mut() {
-                obj.insert("name".to_string(), serde_json::json!(task.package_name));
-                obj.insert("version".to_string(), serde_json::json!(task.version));
-            }
-            pkg
-        }
-        Err(_) => {
-            serde_json::json!({
-                "name": task.package_name,
-                "version": task.version,
-            })
-        }
-    };
-
-    metadata["dist"] = serde_json::json!({
-        "tarball": crate::registry_client::tarball_url(&target_client.registry_url, &task.package_name, &task.version),
-        "shasum": shasum,
-        "integrity": integrity
-    });
 
     for attempt in 0..=retry_count {
         match tokio::time::timeout(
@@ -823,10 +796,6 @@ async fn execute_publish(
     }
 }
 
-/// 修复用附件名前缀。不能沿用 `<name>-<version>.tgz` 形式，否则 cached-list
-/// 插件按文件名解析版本时会多出一个伪版本。
-const ORPHAN_REPAIR_PREFIX: &str = "vcm-repair-";
-
 /// Verdaccio publish 先写 tgz 再登记版本，中途失败会留下孤儿 tarball：文件在盘上，
 /// 元数据里没有该版本。若 `_attachments` 有记录，删掉文件后原名重发即可；
 /// 没有记录时 removeTarball 删不掉它，原名重发又因文件已存在返回 409。
@@ -835,7 +804,7 @@ const ORPHAN_REPAIR_PREFIX: &str = "vcm-repair-";
 async fn repair_orphan_tarball(
     client: &RegistryClient,
     task: &CacheTask,
-    mut metadata: serde_json::Value,
+    metadata: serde_json::Value,
     tarball_data: &[u8],
 ) -> Result<(), String> {
     let _ = client
@@ -866,23 +835,14 @@ async fn repair_orphan_tarball(
             ))
         }
     }
-    let repair_name = format!("{}{}", ORPHAN_REPAIR_PREFIX, filename);
-    metadata["dist"]["tarball"] = serde_json::json!(format!(
-        "{}/{}/-/{}",
-        client.registry_url.trim_end_matches('/'),
-        task.package_name,
-        repair_name
-    ));
-    client
-        .publish_package_as(
-            &task.package_name,
-            &task.version,
-            metadata,
-            tarball_data,
-            &repair_name,
-        )
-        .await
-        .map_err(|e| format!("修复孤儿 tarball 失败: {}", e))
+    crate::orphan_repair::publish_under_repair_name(
+        client,
+        &task.package_name,
+        &task.version,
+        metadata,
+        tarball_data,
+    )
+    .await
 }
 
 /// 推进 latest 失败不影响上传结果：tarball 已落盘，体检页可再修正 dist-tags。

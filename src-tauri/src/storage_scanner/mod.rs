@@ -75,8 +75,8 @@ fn read_package_manifest(pkg_dir: &Path) -> Option<SearchResult> {
 
     let name = json["name"].as_str()?.to_string();
 
-    let cached_versions = list_cached_versions(pkg_dir, &name);
-    if cached_versions.is_empty() {
+    let tarballs = list_cached_versions(pkg_dir, &name);
+    if tarballs.is_empty() {
         return None;
     }
 
@@ -85,6 +85,8 @@ fn read_package_manifest(pkg_dir: &Path) -> Option<SearchResult> {
         .map(|m| m.keys().cloned().collect())
         .unwrap_or_default();
     versions.sort_by(|a, b| compare_versions(a, b));
+    let (cached_versions, orphan_versions) =
+        crate::orphan_repair::split_orphans(&versions, tarballs);
 
     let dist_tag_latest = json["dist-tags"]["latest"]
         .as_str()
@@ -112,6 +114,7 @@ fn read_package_manifest(pkg_dir: &Path) -> Option<SearchResult> {
         latest_version: latest,
         versions,
         cached_versions,
+        orphan_versions,
     })
 }
 

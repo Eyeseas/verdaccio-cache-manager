@@ -27,6 +27,7 @@ import {
   PackageCheck,
   X,
   Copy,
+  Wrench,
 } from "lucide-react";
 import {
   Popover,
@@ -140,6 +141,7 @@ export function SearchPage() {
     ManageTarget[] | null
   >(null);
   const [manageLoading, setManageLoading] = useState(false);
+  const [repairingOrphans, setRepairingOrphans] = useState<string | null>(null);
 
   const isVerdaccio = source === "verdaccio";
 
@@ -254,7 +256,7 @@ export function SearchPage() {
     // Only use local data on verdaccio tab
     if (source === "verdaccio") {
       const local = localPackageByName.get(name);
-      if (local && local.versions.length > 0) {
+      if (local && (local.versions.length > 0 || local.orphan_versions?.length)) {
         setExpanded((prev) => ({
           ...prev,
           [name]: { name, versions: local.versions, loading: false },
@@ -425,6 +427,33 @@ export function SearchPage() {
     }
   };
 
+  // 孤儿版本：tarball 在 storage 中但元数据未登记，npm 看不到；从仓库读回文件后登记
+  const repairOrphans = async (name: string, versions: string[]) => {
+    setRepairingOrphans(name);
+    try {
+      const results = await invoke<{ version: string; error: string | null }[]>(
+        "repair_orphan_versions",
+        { name, versions }
+      );
+      const failed = results.filter((r) => r.error);
+      const ok = results.length - failed.length;
+      if (ok > 0) toast.success(`已登记 ${name} 的 ${ok} 个版本`);
+      if (failed.length > 0) {
+        toast.error(`${failed.length} 个版本登记失败`, {
+          description: failed
+            .slice(0, 5)
+            .map((r) => `${r.version}: ${r.error}`)
+            .join("\n"),
+        });
+      }
+      await loadCachedFromStore({ force: true });
+    } catch (e) {
+      toast.error("登记失败", { description: String(e) });
+    } finally {
+      setRepairingOrphans(null);
+    }
+  };
+
   const getFilteredVersions = (versions: string[]) => {
     const filtered = stableOnly
       ? versions.filter(isStableVersion)
@@ -507,8 +536,18 @@ export function SearchPage() {
               if (!pkg) return null;
 
               const expandedPackage = expanded[pkg.name];
+              // Verdaccio 页签直接读索引，孤儿登记后无需重新展开即可刷新
               const filteredVersions = expandedPackage
-                ? getFilteredVersions(expandedPackage.versions)
+                ? getFilteredVersions(
+                    isVerdaccio && pkg.versions.length > 0
+                      ? pkg.versions
+                      : expandedPackage.versions
+                  )
+                : [];
+              const orphanVersions = isVerdaccio
+                ? [...(pkg.orphan_versions ?? [])].sort((a, b) =>
+                    compareVersions(b, a)
+                  )
                 : [];
 
               return (
@@ -551,6 +590,15 @@ export function SearchPage() {
                           {pkg.latest_version && (
                             <Badge variant="secondary">
                               {pkg.latest_version}
+                            </Badge>
+                          )}
+                          {orphanVersions.length > 0 && (
+                            <Badge
+                              variant="outline"
+                              className="border-amber-500/50 text-amber-600 dark:text-amber-500"
+                              title="tarball 已在仓库中，但元数据未登记，npm 安装时报版本不存在"
+                            >
+                              {orphanVersions.length} 个未登记
                             </Badge>
                           )}
                         </div>
@@ -677,6 +725,38 @@ export function SearchPage() {
                                 </span>
                               )}
                             </div>
+                          </div>
+                        )}
+                        {!expandedPackage.loading && orphanVersions.length > 0 && (
+                          <div className="mt-2 flex flex-wrap items-center gap-2 border-t pt-2">
+                            <span
+                              className="text-xs text-amber-600 dark:text-amber-500"
+                              title="tarball 已在仓库中，但元数据未登记，npm 安装时报版本不存在"
+                            >
+                              未登记：
+                            </span>
+                            {orphanVersions.map((v) => (
+                              <span
+                                key={v}
+                                className="rounded-md border border-dashed border-amber-500/50 bg-amber-500/10 px-2 py-1 text-sm text-amber-700 dark:text-amber-400"
+                              >
+                                {v}
+                              </span>
+                            ))}
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              className="ml-auto h-7 border-amber-500/50 text-amber-600 hover:bg-amber-500/10 hover:text-amber-600"
+                              disabled={repairingOrphans !== null}
+                              onClick={() => repairOrphans(pkg.name, orphanVersions)}
+                            >
+                              {repairingOrphans === pkg.name ? (
+                                <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+                              ) : (
+                                <Wrench className="mr-1.5 h-3.5 w-3.5" />
+                              )}
+                              登记到元数据
+                            </Button>
                           </div>
                         )}
                       </div>

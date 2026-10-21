@@ -1,9 +1,10 @@
-//! Verdaccio storage 体检：找出两类会导致离线安装缺包的元数据问题。
+//! Verdaccio storage 体检：找出三类会导致离线安装缺包的元数据问题。
 //!
 //! 1. 幽灵版本：元数据里列出、但本地没有 tarball。通常来自曾经联网时缓存的
 //!    uplink 元数据，npm 选中后 Verdaccio 转去 uplink 拉取，离线时返回 500。
 //! 2. latest 过时：npm 只要 `dist-tags.latest` 满足范围就优先选它，即使有更高
 //!    版本。latest 停在旧的 uplink 缓存版本上时，后补的新版本永远不会被选中。
+//! 3. 孤儿 tarball：有 tgz 但元数据未登记该版本，见 [`crate::orphan_repair`]。
 
 use crate::registry_client::RegistryClient;
 use crate::storage_scanner::{ensure_storage_dir, list_cached_versions, package_dirs};
@@ -19,8 +20,11 @@ pub struct PackageHealth {
     pub missing_versions: Vec<String>,
     /// 元数据中存在且本地有 tarball 的版本（升序）
     pub cached_versions: Vec<String>,
+    /// 本地有 tarball、但元数据未登记的版本（升序）
+    #[serde(default)]
+    pub orphan_versions: Vec<String>,
     pub latest: Option<String>,
-    /// 修复后 latest 应指向的版本：本地可用的最高正式版
+    /// 修复后 latest 应指向的版本：本地可用（含待登记孤儿）的最高正式版
     pub expected_latest: Option<String>,
     /// dist-tags.latest 指向的版本没有 tarball
     pub latest_missing: bool,
@@ -57,6 +61,8 @@ pub struct RepairOutcome {
     pub name: String,
     pub action: RepairAction,
     pub removed_versions: Vec<String>,
+    /// 已登记进元数据的孤儿版本
+    pub registered_versions: Vec<String>,
     pub previous_latest: Option<String>,
     /// latest 被修改时的新值
     pub new_latest: Option<String>,
@@ -70,6 +76,7 @@ impl RepairOutcome {
             name: name.to_string(),
             action,
             removed_versions: vec![],
+            registered_versions: vec![],
             previous_latest: None,
             new_latest: None,
             backup_path: None,
@@ -161,14 +168,35 @@ pub async fn check_remote(client: &RegistryClient) -> Result<HealthReport, Strin
 pub async fn repair_remote(client: &RegistryClient, packages: Vec<PackageHealth>) -> Vec<RepairOutcome> {
     let mut outcomes = Vec::with_capacity(packages.len());
     for pkg in packages {
-        let new_latest = pkg.expected_latest.clone().filter(|_| pkg.latest_stale);
-        let result = if pkg.cached_versions.is_empty() {
+        // 先登记孤儿：登记成功的才算可用版本，参与 latest 取值
+        let mut registered = Vec::new();
+        let mut orphan_errors = Vec::new();
+        for v in &pkg.orphan_versions {
+            match crate::orphan_repair::repair_from_registry(client, &pkg.name, v).await {
+                Ok(()) => registered.push(v.clone()),
+                Err(e) => orphan_errors.push(format!("{}: {}", v, e)),
+            }
+        }
+        if !orphan_errors.is_empty() {
+            outcomes.push(RepairOutcome {
+                registered_versions: registered,
+                message: Some(format!("孤儿版本登记失败（{}），未继续修复", orphan_errors.join("；"))),
+                ..RepairOutcome::new(&pkg.name, RepairAction::Failed)
+            });
+            continue;
+        }
+
+        let mut available = pkg.cached_versions.clone();
+        available.extend(registered.iter().cloned());
+        sort_versions(&mut available);
+        let new_latest = preferred_latest(&available).filter(|v| pkg.latest.as_ref() != Some(v));
+        let result = if available.is_empty() {
             client
                 .unpublish_package(&pkg.name, None)
                 .await
                 .map(|_| RepairAction::Removed)
         } else if pkg.missing_versions.is_empty() && new_latest.is_none() {
-            Ok(RepairAction::Skipped)
+            Ok(if registered.is_empty() { RepairAction::Skipped } else { RepairAction::Repaired })
         } else {
             client
                 .prune_versions(&pkg.name, &pkg.missing_versions, new_latest.as_deref())
@@ -182,6 +210,7 @@ pub async fn repair_remote(client: &RegistryClient, packages: Vec<PackageHealth>
                 name: pkg.name,
                 action,
                 removed_versions: pkg.missing_versions,
+                registered_versions: registered,
                 previous_latest: pkg.latest,
                 new_latest,
                 backup_path: None,
@@ -196,12 +225,17 @@ pub async fn repair_remote(client: &RegistryClient, packages: Vec<PackageHealth>
     outcomes
 }
 
-pub fn repair_packages(storage_path: &Path, names: &[String]) -> Result<Vec<RepairOutcome>, String> {
+/// `registry_url` 仅用于登记孤儿版本时写入 dist.tarball（Verdaccio 输出时只取其文件名）。
+pub fn repair_packages(
+    storage_path: &Path,
+    names: &[String],
+    registry_url: &str,
+) -> Result<Vec<RepairOutcome>, String> {
     ensure_storage_dir(storage_path)?;
     Ok(names
         .iter()
         .map(|name| {
-            repair_package(storage_path, name).unwrap_or_else(|e| RepairOutcome {
+            repair_package(storage_path, name, registry_url).unwrap_or_else(|e| RepairOutcome {
                 message: Some(e),
                 ..RepairOutcome::new(name, RepairAction::Failed)
             })
@@ -260,18 +294,23 @@ fn assess(
     latest: Option<String>,
 ) -> Option<PackageHealth> {
     let tarball_set: HashSet<&str> = tarballs.iter().map(String::as_str).collect();
+    let (_, mut orphan_versions) =
+        crate::orphan_repair::split_orphans(&versions, tarballs.to_vec());
     let (mut cached_versions, mut missing_versions): (Vec<String>, Vec<String>) = versions
         .into_iter()
         .partition(|v| tarball_set.contains(v.as_str()));
     sort_versions(&mut cached_versions);
     sort_versions(&mut missing_versions);
-    let expected_latest = preferred_latest(&cached_versions);
+    sort_versions(&mut orphan_versions);
+    let mut available = [cached_versions.clone(), orphan_versions.clone()].concat();
+    sort_versions(&mut available);
+    let expected_latest = preferred_latest(&available);
     let latest_missing = latest
         .as_deref()
         .is_some_and(|v| !cached_versions.iter().any(|c| c == v));
     let latest_stale = expected_latest.is_some() && latest != expected_latest;
 
-    if missing_versions.is_empty() && !latest_stale {
+    if missing_versions.is_empty() && orphan_versions.is_empty() && !latest_stale {
         return None;
     }
 
@@ -279,6 +318,7 @@ fn assess(
         name,
         missing_versions,
         cached_versions,
+        orphan_versions,
         latest,
         expected_latest,
         latest_missing,
@@ -300,10 +340,45 @@ fn package_dir(storage_path: &Path, name: &str) -> Result<PathBuf, String> {
     Ok(storage_path.join(rel))
 }
 
-fn repair_package(storage_path: &Path, name: &str) -> Result<RepairOutcome, String> {
+/// 把孤儿 tarball 直接写入元数据（版本条目与 `_attachments`），返回登记的版本。
+/// 任一文件内容与文件名不符即整体放弃，不修改元数据。
+fn register_orphans(
+    json: &mut serde_json::Value,
+    pkg_dir: &Path,
+    name: &str,
+    registry_url: &str,
+) -> Result<Vec<String>, String> {
+    let (_, orphans) = crate::orphan_repair::split_orphans(
+        &manifest_versions(json),
+        list_cached_versions(pkg_dir, name),
+    );
+    for v in &orphans {
+        let filename = crate::registry_client::tarball_filename(name, v);
+        let data = std::fs::read(pkg_dir.join(&filename))
+            .map_err(|e| format!("读取 {} 失败: {}", filename, e))?;
+        crate::orphan_repair::verify_identity(name, v, &data)
+            .map_err(|e| format!("{}: {}", filename, e))?;
+        let url = crate::registry_client::tarball_url(registry_url, name, v);
+        if !json["versions"].is_object() {
+            json["versions"] = serde_json::json!({});
+        }
+        json["versions"][v] = crate::orphan_repair::version_metadata(name, v, &data, url);
+        if !json["_attachments"].is_object() {
+            json["_attachments"] = serde_json::json!({});
+        }
+        json["_attachments"][&filename] = serde_json::json!({
+            "shasum": crate::orphan_repair::shasum(&data),
+            "version": v,
+        });
+    }
+    Ok(orphans)
+}
+
+fn repair_package(storage_path: &Path, name: &str, registry_url: &str) -> Result<RepairOutcome, String> {
     let pkg_dir = package_dir(storage_path, name)?;
     let manifest_path = pkg_dir.join("package.json");
     let mut json = read_manifest(&pkg_dir)?;
+    let registered = register_orphans(&mut json, &pkg_dir, name, registry_url)?;
 
     let (cached, missing) = partition_versions(&json, &pkg_dir, name);
     let previous_latest = latest_of(&json);
@@ -322,7 +397,7 @@ fn repair_package(storage_path: &Path, name: &str) -> Result<RepairOutcome, Stri
         json["dist-tags"]["latest"] = serde_json::Value::String(v.clone());
     }
 
-    if missing.is_empty() && new_latest.is_none() {
+    if missing.is_empty() && new_latest.is_none() && registered.is_empty() {
         return Ok(RepairOutcome {
             message: Some("元数据与 tarball 一致，latest 已是最新".to_string()),
             ..RepairOutcome::new(name, RepairAction::Skipped)
@@ -349,6 +424,7 @@ fn repair_package(storage_path: &Path, name: &str) -> Result<RepairOutcome, Stri
         name: name.to_string(),
         action,
         removed_versions: missing,
+        registered_versions: registered,
         previous_latest,
         new_latest,
         backup_path: Some(backup_path.to_string_lossy().to_string()),
@@ -487,7 +563,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let dir = write_pkg(tmp.path(), "balanced-match", balanced_match_manifest(), &["1.0.2", "4.0.2"]);
 
-        let outcomes = repair_packages(tmp.path(), &["balanced-match".to_string()]).unwrap();
+        let outcomes = repair_packages(tmp.path(), &["balanced-match".to_string()], "http://r").unwrap();
         assert_eq!(outcomes[0].action, RepairAction::Repaired);
         assert_eq!(outcomes[0].removed_versions, vec!["4.0.3", "4.0.4"]);
         assert_eq!(outcomes[0].previous_latest.as_deref(), Some("4.0.3"));
@@ -517,7 +593,7 @@ mod tests {
             &["4.0.3", "4.0.4", "5.0.0-rc.1"],
         );
 
-        let outcomes = repair_packages(tmp.path(), &["balanced-match".to_string()]).unwrap();
+        let outcomes = repair_packages(tmp.path(), &["balanced-match".to_string()], "http://r").unwrap();
         assert_eq!(outcomes[0].action, RepairAction::Repaired);
         assert!(outcomes[0].removed_versions.is_empty());
         assert_eq!(outcomes[0].new_latest.as_deref(), Some("4.0.4"));
@@ -529,7 +605,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let dir = write_pkg(tmp.path(), "@scope/ghost", simple_manifest("@scope/ghost", &["1.0.0"], "1.0.0"), &[]);
 
-        let outcomes = repair_packages(tmp.path(), &["@scope/ghost".to_string()]).unwrap();
+        let outcomes = repair_packages(tmp.path(), &["@scope/ghost".to_string()], "http://r").unwrap();
         assert_eq!(outcomes[0].action, RepairAction::Removed);
         assert!(!dir.join("package.json").exists());
         assert!(Path::new(outcomes[0].backup_path.as_ref().unwrap()).exists());
@@ -541,7 +617,7 @@ mod tests {
         write_pkg(tmp.path(), "ok", simple_manifest("ok", &["1.0.0"], "1.0.0"), &["1.0.0"]);
 
         let outcomes =
-            repair_packages(tmp.path(), &["ok".to_string(), "../evil".to_string()]).unwrap();
+            repair_packages(tmp.path(), &["ok".to_string(), "../evil".to_string()], "http://r").unwrap();
         assert_eq!(outcomes[0].action, RepairAction::Skipped);
         assert_eq!(outcomes[1].action, RepairAction::Failed);
     }
@@ -554,6 +630,43 @@ mod tests {
         assert!(pkg.latest_missing);
         assert!(!pkg.latest_stale);
         assert!(assess("ok".into(), vec!["1.0.0".into()], &["1.0.0".into()], Some("1.0.0".into())).is_none());
+    }
+
+    #[test]
+    fn orphan_tarball_is_reported_and_registered_locally() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = write_pkg(tmp.path(), "ansi-styles", simple_manifest("ansi-styles", &["3.2.1"], "3.2.1"), &["3.2.1"]);
+        std::fs::write(
+            dir.join("ansi-styles-4.3.0.tgz"),
+            crate::orphan_repair::test_tarball("ansi-styles", "4.3.0"),
+        )
+        .unwrap();
+
+        let report = check_storage(tmp.path()).unwrap();
+        let pkg = &report.unhealthy[0];
+        assert_eq!(pkg.orphan_versions, vec!["4.3.0"]);
+        assert_eq!(pkg.expected_latest.as_deref(), Some("4.3.0"));
+
+        let outcomes = repair_packages(tmp.path(), &["ansi-styles".to_string()], "http://r").unwrap();
+        assert_eq!(outcomes[0].action, RepairAction::Repaired);
+        assert_eq!(outcomes[0].registered_versions, vec!["4.3.0"]);
+        assert_eq!(outcomes[0].new_latest.as_deref(), Some("4.3.0"));
+        let json = read_manifest(&dir).unwrap();
+        assert_eq!(json["versions"]["4.3.0"]["dependencies"]["dep"], "^1");
+        assert_eq!(json["versions"]["4.3.0"]["dist"]["tarball"], "http://r/ansi-styles/-/ansi-styles-4.3.0.tgz");
+        assert_eq!(json["_attachments"]["ansi-styles-4.3.0.tgz"]["version"], "4.3.0");
+        assert!(check_storage(tmp.path()).unwrap().unhealthy.is_empty());
+    }
+
+    #[test]
+    fn local_repair_refuses_orphan_with_mismatched_content() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = write_pkg(tmp.path(), "ansi-styles", simple_manifest("ansi-styles", &["3.2.1"], "3.2.1"), &["3.2.1"]);
+        std::fs::write(dir.join("ansi-styles-4.3.0.tgz"), b"not a tarball").unwrap();
+
+        let outcomes = repair_packages(tmp.path(), &["ansi-styles".to_string()], "http://r").unwrap();
+        assert_eq!(outcomes[0].action, RepairAction::Failed);
+        assert!(read_manifest(&dir).unwrap()["versions"].get("4.3.0").is_none());
     }
 
     #[test]

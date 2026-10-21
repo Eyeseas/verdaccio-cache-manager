@@ -15,8 +15,12 @@ pub struct SearchResult {
     pub description: Option<String>,
     pub latest_version: Option<String>,
     pub versions: Vec<String>,
+    /// 元数据中已登记且有 tarball 的版本
     #[serde(default)]
     pub cached_versions: Vec<String>,
+    /// 有 tarball 但元数据未登记的孤儿版本，npm 不可见
+    #[serde(default)]
+    pub orphan_versions: Vec<String>,
 }
 
 pub struct RegistryClient {
@@ -157,7 +161,8 @@ impl RegistryClient {
                         .unwrap_or_default()
                 };
                 let versions = str_arr("versions");
-                let cached_versions = str_arr("cached_versions");
+                let (cached_versions, orphan_versions) =
+                    crate::orphan_repair::split_orphans(&versions, str_arr("cached_versions"));
                 Some(SearchResult {
                     name,
                     description: pkg["description"].as_str().map(|s| s.to_string()),
@@ -168,6 +173,7 @@ impl RegistryClient {
                         .or_else(|| versions.last().cloned()),
                     versions,
                     cached_versions,
+                    orphan_versions,
                 })
             })
             .collect();
@@ -197,6 +203,7 @@ impl RegistryClient {
                     latest_version: pkg["version"].as_str().map(|s| s.to_string()),
                     versions: vec![],
                     cached_versions: vec![],
+                    orphan_versions: vec![],
                 })
             })
             .collect();
