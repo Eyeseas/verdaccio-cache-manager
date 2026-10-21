@@ -287,6 +287,43 @@ impl RegistryClient {
             .map_err(|e| format!("解析包元数据失败: {}", e))
     }
 
+    /// 版本是否已登记在 packument 中；包不存在视为未登记。
+    pub async fn has_version(&self, name: &str, version: &str) -> Result<bool, String> {
+        match self.fetch_packument(name).await {
+            Ok(doc) => Ok(doc["versions"]
+                .get(version)
+                .is_some_and(|v| !v.is_null())),
+            Err(e) if e.contains("不存在") => Ok(false),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// 带认证读取目标 registry 上的 tarball 文件；不存在时返回 `Ok(None)`。
+    pub async fn fetch_tarball_file(
+        &self,
+        name: &str,
+        filename: &str,
+    ) -> Result<Option<Vec<u8>>, String> {
+        let url = format!("{}/{}/-/{}", self.registry_url, name, filename);
+        let resp = self
+            .apply_auth(self.http.get(&url))
+            .send()
+            .await
+            .map_err(|e| format!("读取 tarball 失败: {}", e))?;
+        let status = resp.status();
+        if status.as_u16() == 404 {
+            return Ok(None);
+        }
+        if !status.is_success() {
+            return Err(format!("读取 tarball 失败 (HTTP {})", status));
+        }
+        let bytes = resp
+            .bytes()
+            .await
+            .map_err(|e| format!("读取 tarball 失败: {}", e))?;
+        Ok(Some(bytes.to_vec()))
+    }
+
     /// 从一组版本号中按 semver 选出最大版本，解析失败时回退到字符串比较。
     fn max_version<'a, I: Iterator<Item = &'a String>>(
         versions: I,
@@ -602,11 +639,25 @@ impl RegistryClient {
         metadata: serde_json::Value,
         tarball: &[u8],
     ) -> Result<(), String> {
+        let tarball_name = tarball_filename(name, version);
+        self.publish_package_as(name, version, metadata, tarball, &tarball_name)
+            .await
+    }
+
+    /// 以指定附件文件名发布。Verdaccio 用附件名作为落盘文件名，
+    /// 调用方需同步让 `metadata.dist.tarball` 指向同一文件名。
+    pub async fn publish_package_as(
+        &self,
+        name: &str,
+        version: &str,
+        metadata: serde_json::Value,
+        tarball: &[u8],
+        tarball_name: &str,
+    ) -> Result<(), String> {
         self.ensure_token().await?;
 
         use base64::Engine;
         let encoded = base64::engine::general_purpose::STANDARD.encode(tarball);
-        let tarball_name = format!("{}-{}.tgz", name, version);
 
         let body = serde_json::json!({
             "name": name,

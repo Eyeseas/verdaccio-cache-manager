@@ -1,6 +1,7 @@
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 use sha1::Digest as _;
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -280,9 +281,17 @@ impl TaskEngine {
         // PUT /-/user/org.couchdb.user:cache-manager 而打满 409 日志
         let _ = target_client.ensure_token().await;
 
+        // Verdaccio 对同一包的 publish 不是原子的（先写 tgz 再改 package.json，
+        // 且拿不到文件锁时会无锁继续），同包多版本并发发布会互相覆盖元数据、
+        // 留下孤儿 tarball。同名包串行，不同包仍并发。
+        let mut package_locks: HashMap<String, Arc<Mutex<()>>> = HashMap::new();
         let mut handles = Vec::new();
 
         for task in tasks_snapshot {
+            let package_lock = package_locks
+                .entry(task.package_name.clone())
+                .or_default()
+                .clone();
             let sem = self.semaphore.clone();
             let tasks_ref = self.tasks.clone();
             let app = app_handle.clone();
@@ -293,6 +302,8 @@ impl TaskEngine {
             let history_db = self.history_db.clone();
 
             let handle = tokio::spawn(async move {
+                // 先排包锁再取并发许可，排队中的任务不占用并发名额
+                let _package_guard = package_lock.lock().await;
                 let _permit = sem.acquire().await.unwrap();
                 execute_single_task(
                     task,
@@ -646,6 +657,51 @@ async fn execute_publish(
             }
             Ok(Err(e)) => {
                 if e.contains("409") || e.contains("conflict") || e.contains("already exist") {
+                    // 冲突但版本未登记：文件名被孤儿 tarball 占用，unpublish 也删不掉它
+                    if let Ok(false) = target_client
+                        .has_version(&task.package_name, &task.version)
+                        .await
+                    {
+                        let repaired = tokio::time::timeout(
+                            Duration::from_secs(timeout_secs),
+                            repair_orphan_tarball(&target_client, &task, metadata.clone(), &tarball_data),
+                        )
+                        .await
+                        .unwrap_or_else(|_| Err("修复孤儿 tarball 超时".to_string()));
+                        match repaired {
+                            Ok(()) => {
+                                promote_latest_best_effort(&target_client, &task, timeout_secs).await;
+                                update_task_status(
+                                    &tasks,
+                                    &task.id,
+                                    TaskStatus::Success,
+                                    None,
+                                    None,
+                                    attempt + 1,
+                                    &run_meta,
+                                    &app,
+                                    history_db.as_ref(),
+                                )
+                                .await;
+                            }
+                            Err(err) => {
+                                update_task_status(
+                                    &tasks,
+                                    &task.id,
+                                    TaskStatus::Failed,
+                                    Some(err),
+                                    Some(TaskStage::Upload),
+                                    attempt + 1,
+                                    &run_meta,
+                                    &app,
+                                    history_db.as_ref(),
+                                )
+                                .await;
+                            }
+                        }
+                        return;
+                    }
+
                     let is_local = tarball_url.starts_with("file://") || tarball_url.starts_with("dir://");
                     if !is_local {
                         // Remote source: trust that the version genuinely exists
@@ -765,6 +821,68 @@ async fn execute_publish(
             }
         }
     }
+}
+
+/// 修复用附件名前缀。不能沿用 `<name>-<version>.tgz` 形式，否则 cached-list
+/// 插件按文件名解析版本时会多出一个伪版本。
+const ORPHAN_REPAIR_PREFIX: &str = "vcm-repair-";
+
+/// Verdaccio publish 先写 tgz 再登记版本，中途失败会留下孤儿 tarball：文件在盘上，
+/// 元数据里没有该版本。若 `_attachments` 有记录，删掉文件后原名重发即可；
+/// 没有记录时 removeTarball 删不掉它，原名重发又因文件已存在返回 409。
+/// 此时若内容一致就换一个附件名发布来登记版本；原文件保留，
+/// lockfile 里按原 URL 下载仍能通过 integrity 校验。
+async fn repair_orphan_tarball(
+    client: &RegistryClient,
+    task: &CacheTask,
+    mut metadata: serde_json::Value,
+    tarball_data: &[u8],
+) -> Result<(), String> {
+    let _ = client
+        .unpublish_package(&task.package_name, Some(&task.version))
+        .await;
+    match client
+        .publish_package(&task.package_name, &task.version, metadata.clone(), tarball_data)
+        .await
+    {
+        Ok(()) => return Ok(()),
+        Err(e) if e.contains("409") => {}
+        Err(e) => return Err(format!("修复孤儿 tarball 失败: {}", e)),
+    }
+
+    let filename = crate::registry_client::tarball_filename(&task.package_name, &task.version);
+    match client.fetch_tarball_file(&task.package_name, &filename).await? {
+        Some(existing) if existing == tarball_data => {}
+        Some(_) => {
+            return Err(format!(
+                "服务端存在内容不同的孤儿文件 {}，请在 Verdaccio storage 中手动删除后重试",
+                filename
+            ))
+        }
+        None => {
+            return Err(format!(
+                "发布冲突但服务端既无该版本也无文件 {}，请稍后重试",
+                filename
+            ))
+        }
+    }
+    let repair_name = format!("{}{}", ORPHAN_REPAIR_PREFIX, filename);
+    metadata["dist"]["tarball"] = serde_json::json!(format!(
+        "{}/{}/-/{}",
+        client.registry_url.trim_end_matches('/'),
+        task.package_name,
+        repair_name
+    ));
+    client
+        .publish_package_as(
+            &task.package_name,
+            &task.version,
+            metadata,
+            tarball_data,
+            &repair_name,
+        )
+        .await
+        .map_err(|e| format!("修复孤儿 tarball 失败: {}", e))
 }
 
 /// 推进 latest 失败不影响上传结果：tarball 已落盘，体检页可再修正 dist-tags。
@@ -971,6 +1089,132 @@ fn pack_directory(dir_path: &str) -> Result<Vec<u8>, String> {
 mod tests {
     use super::*;
     use crate::cache_db::{TaskBatchSummary, TaskItemRecord};
+    use serde_json::json;
+    use wiremock::matchers::{body_partial_json, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn orphan_task() -> CacheTask {
+        CacheTask {
+            id: "t".into(),
+            batch_id: "b".into(),
+            package_name: "left-pad".into(),
+            version: "1.0.0".into(),
+            tarball_url: Some("file:///tmp/left-pad-1.0.0.tgz".into()),
+            status: TaskStatus::Uploading,
+            error: None,
+            error_code: None,
+            attempt_count: 0,
+            started_at: None,
+            finished_at: None,
+            duration_ms: None,
+        }
+    }
+
+    async fn orphan_server(orphan: &[u8]) -> MockServer {
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path("/-/user/org.couchdb.user:cache-manager"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(json!({"token": "tok"})))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/left-pad/-/left-pad-1.0.0.tgz"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(orphan.to_vec()))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/left-pad"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "_rev": "2-abc", "versions": {"0.9.0": {}}, "dist-tags": {"latest": "0.9.0"}
+            })))
+            .mount(&server)
+            .await;
+        server
+    }
+
+    /// 孤儿未登记 `_attachments`：删除返回 404，原名重发 409。
+    async fn mount_undeletable_orphan(server: &MockServer) {
+        Mock::given(method("DELETE"))
+            .and(path("/left-pad/-/left-pad-1.0.0.tgz/-rev/2-abc"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(server)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path("/left-pad"))
+            .and(body_partial_json(json!({"_attachments": {"left-pad-1.0.0.tgz": {}}})))
+            .respond_with(ResponseTemplate::new(409))
+            .mount(server)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn repairs_deletable_orphan_under_original_name() {
+        let data = b"tarball-bytes".to_vec();
+        let server = orphan_server(b"stale").await;
+        Mock::given(method("DELETE"))
+            .and(path("/left-pad/-/left-pad-1.0.0.tgz/-rev/2-abc"))
+            .respond_with(ResponseTemplate::new(201))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path("/left-pad"))
+            .and(body_partial_json(json!({"_attachments": {"left-pad-1.0.0.tgz": {}}})))
+            .respond_with(ResponseTemplate::new(201))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = RegistryClient::new(&server.uri());
+        let metadata = json!({"name": "left-pad", "version": "1.0.0", "dist": {}});
+        repair_orphan_tarball(&client, &orphan_task(), metadata, &data)
+            .await
+            .expect("deletable orphan should be republished under its own name");
+    }
+
+    #[tokio::test]
+    async fn repairs_identical_orphan_under_alternate_attachment_name() {
+        let data = b"tarball-bytes".to_vec();
+        let server = orphan_server(&data).await;
+        mount_undeletable_orphan(&server).await;
+        let repaired_url = format!("{}/left-pad/-/vcm-repair-left-pad-1.0.0.tgz", server.uri());
+        Mock::given(method("PUT"))
+            .and(path("/left-pad"))
+            .and(body_partial_json(json!({
+                "versions": {"1.0.0": {"dist": {"tarball": repaired_url}}},
+                "_attachments": {"vcm-repair-left-pad-1.0.0.tgz": {}}
+            })))
+            .respond_with(ResponseTemplate::new(201))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = RegistryClient::new(&server.uri());
+        let metadata = json!({"name": "left-pad", "version": "1.0.0", "dist": {"tarball": "x"}});
+        repair_orphan_tarball(&client, &orphan_task(), metadata, &data)
+            .await
+            .expect("identical orphan should be repaired");
+    }
+
+    #[tokio::test]
+    async fn refuses_to_repair_when_orphan_content_differs() {
+        let server = orphan_server(b"other-bytes").await;
+        mount_undeletable_orphan(&server).await;
+        Mock::given(method("PUT"))
+            .and(path("/left-pad"))
+            .and(body_partial_json(json!({"_attachments": {"vcm-repair-left-pad-1.0.0.tgz": {}}})))
+            .respond_with(ResponseTemplate::new(201))
+            .expect(0)
+            .mount(&server)
+            .await;
+
+        let client = RegistryClient::new(&server.uri());
+        let metadata = json!({"name": "left-pad", "version": "1.0.0", "dist": {}});
+        let err = repair_orphan_tarball(&client, &orphan_task(), metadata, b"tarball-bytes")
+            .await
+            .unwrap_err();
+        assert!(err.contains("内容不同"), "{}", err);
+    }
 
     #[test]
     fn classifies_common_task_errors() {
