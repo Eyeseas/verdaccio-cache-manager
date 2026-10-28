@@ -67,13 +67,13 @@ export function UploadPage() {
           <TabsTrigger value="tgz">上传 .tgz</TabsTrigger>
           <TabsTrigger value="offline">导入离线包目录</TabsTrigger>
         </TabsList>
-        <TabsContent value="scan" className="flex min-h-0 flex-1 flex-col">
+        <TabsContent value="scan" keepMounted className="flex min-h-0 flex-1 flex-col">
           <ScanTab />
         </TabsContent>
-        <TabsContent value="tgz" className="flex min-h-0 flex-1 flex-col">
+        <TabsContent value="tgz" keepMounted className="flex min-h-0 flex-1 flex-col">
           <TgzTab />
         </TabsContent>
-        <TabsContent value="offline" className="flex min-h-0 flex-1 flex-col">
+        <TabsContent value="offline" keepMounted className="flex min-h-0 flex-1 flex-col">
           <OfflineBundleTab />
         </TabsContent>
       </Tabs>

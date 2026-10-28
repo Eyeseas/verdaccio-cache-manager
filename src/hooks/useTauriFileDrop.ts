@@ -33,6 +33,8 @@ export function useTauriFileDrop({
       const el = zoneRef.current;
       if (!el) return false;
       const rect = el.getBoundingClientRect();
+      // 隐藏的页面/标签页（keep-alive）尺寸为 0，不应响应拖放
+      if (rect.width === 0 || rect.height === 0) return false;
       const dpr = window.devicePixelRatio || 1;
       const px = x / dpr;
       const py = y / dpr;
