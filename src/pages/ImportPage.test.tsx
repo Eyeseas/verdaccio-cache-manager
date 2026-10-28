@@ -92,6 +92,30 @@ describe("ImportPage install command mode", () => {
     expect(screen.getAllByText("根包")).toHaveLength(2);
   });
 
+  it("returns to the command input with previous text instead of opening the file picker", async () => {
+    invoke.mockImplementation((command: string) => {
+      if (command === "get_node_version") return Promise.resolve("v22.12.0");
+      if (command === "check_cached_status") {
+        return Promise.resolve([{ name: "react", version: "latest", cached: false }]);
+      }
+      return Promise.resolve([]);
+    });
+
+    render(<ImportPage />);
+    fireEvent.click(screen.getByRole("tab", { name: "安装命令" }));
+    fireEvent.change(screen.getByLabelText("安装命令"), {
+      target: { value: "npm install react" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "解析命令" }));
+    expect(await screen.findByText("react")).toBeInTheDocument();
+
+    expect(screen.queryByRole("button", { name: "重新选择" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "重新输入" }));
+
+    expect(open).not.toHaveBeenCalled();
+    expect(screen.getByLabelText("安装命令")).toHaveValue("npm install react");
+  });
+
   it("resolves full dependencies on explicit action", async () => {
     invoke.mockImplementation((command: string) => {
       if (command === "get_node_version") return Promise.resolve("v22.12.0");
