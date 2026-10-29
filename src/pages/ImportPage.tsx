@@ -842,22 +842,16 @@ export function ImportPage() {
               <Button variant="ghost" size="sm" onClick={deselectAll}>
                 取消全选
               </Button>
-              {importSource === "command" ? (
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => {
-                    resetImportState();
-                    setInputMode("command");
-                  }}
-                >
-                  重新输入
-                </Button>
-              ) : (
-                <Button variant="outline" size="sm" onClick={handleSelectFile}>
-                  重新选择
-                </Button>
-              )}
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => {
+                  resetImportState();
+                  setInputMode(importSource);
+                }}
+              >
+                {importSource === "command" ? "重新输入" : "重新选择"}
+              </Button>
             </div>
           </div>
 

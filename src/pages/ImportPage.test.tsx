@@ -116,6 +116,35 @@ describe("ImportPage install command mode", () => {
     expect(screen.getByLabelText("安装命令")).toHaveValue("npm install react");
   });
 
+  it("returns to the file entry page instead of reopening the file picker", async () => {
+    open.mockResolvedValue("/tmp/package-lock.json");
+    invoke.mockImplementation((command: string) => {
+      if (command === "read_dependency_file") {
+        return Promise.resolve({
+          kind: "lockfile",
+          dependencies: [{ name: "react", version: "19.0.0" }],
+          replenishment: null,
+        });
+      }
+      if (command === "check_cached_status") {
+        return Promise.resolve([{ name: "react", version: "19.0.0", cached: false }]);
+      }
+      return Promise.resolve([]);
+    });
+
+    render(<ImportPage />);
+    fireEvent.click(screen.getByRole("button", { name: /选择文件/ }));
+    expect(await screen.findByText("react")).toBeInTheDocument();
+    expect(open).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(screen.getByRole("button", { name: "重新选择" }));
+
+    expect(open).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("tab", { name: "依赖文件" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "安装命令" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /选择文件/ })).toBeInTheDocument();
+  });
+
   it("resolves full dependencies on explicit action", async () => {
     invoke.mockImplementation((command: string) => {
       if (command === "get_node_version") return Promise.resolve("v22.12.0");
