@@ -308,12 +308,31 @@ pub(crate) fn extract_deps(body: &serde_json::Value) -> Vec<DepSpec> {
         }
     }
     map.into_iter()
-        .map(|(name, (range, optional))| DepSpec {
-            name,
-            range,
-            optional,
+        .map(|(name, (range, optional))| {
+            // alias："npm:real-pkg@range" 需按真名/真范围解析，别名本身在仓库中不存在
+            let (name, range) = parse_npm_alias(&range).unwrap_or((name, range));
+            DepSpec {
+                name,
+                range,
+                optional,
+            }
         })
         .collect()
+}
+
+/// 解析 "npm:<name>[@<range>]"（支持 scoped 包名），缺省范围视作 latest。
+fn parse_npm_alias(spec: &str) -> Option<(String, String)> {
+    let rest = spec.trim().strip_prefix("npm:")?;
+    // scoped 包名以 '@' 开头，版本分隔符须在其后查找
+    let (name, range) = match rest[1.min(rest.len())..].find('@') {
+        Some(i) => (&rest[..i + 1], &rest[i + 2..]),
+        None => (rest, ""),
+    };
+    if name.is_empty() {
+        return None;
+    }
+    let range = if range.is_empty() { "latest" } else { range };
+    Some((name.to_string(), range.to_string()))
 }
 
 async fn fetch_packument(
@@ -411,6 +430,31 @@ mod tests {
         let entry = find(&deps, "shared").unwrap();
         assert_eq!(entry.range, "^1.0.0", "应采用 optional 的版本范围");
         assert!(entry.optional, "同名时应标记为可选（安装失败可继续）");
+    }
+
+    #[test]
+    fn extract_deps_resolves_npm_alias() {
+        // 模拟 @openai/codex：平台二进制以 alias 指向自身的预发布版本
+        let body = json!({
+            "optionalDependencies": {
+                "@openai/codex-linux-x64": "npm:@openai/codex@0.165.0-linux-x64",
+                "@openai/codex-win32-x64": "npm:@openai/codex@0.165.0-win32-x64",
+                "plain-alias": "npm:real-pkg@^2.0.0",
+                "no-range": "npm:other-pkg"
+            }
+        });
+        let deps = extract_deps(&body);
+        assert_eq!(deps.len(), 4);
+        let mut codex: Vec<_> = deps
+            .iter()
+            .filter(|d| d.name == "@openai/codex")
+            .map(|d| d.range.as_str())
+            .collect();
+        codex.sort();
+        assert_eq!(codex, ["0.165.0-linux-x64", "0.165.0-win32-x64"]);
+        assert_eq!(find(&deps, "real-pkg").unwrap().range, "^2.0.0");
+        assert_eq!(find(&deps, "other-pkg").unwrap().range, "latest");
+        assert!(deps.iter().all(|d| d.optional));
     }
 
     #[test]
