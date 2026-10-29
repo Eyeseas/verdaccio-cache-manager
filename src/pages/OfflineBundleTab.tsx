@@ -27,8 +27,10 @@ export function OfflineBundleTab() {
   const [result, setResult] = useState<ImportResult | null>(null);
   const [busy, setBusy] = useState(false);
   const [progress, setProgress] = useState("");
+  const [live, setLive] = useState<Map<string, CacheTask>>(new Map());
   const listRef = useRef<HTMLDivElement>(null);
-  const tasks = useMemo(() => new Map(result?.tasks.map((t) => [`${t.package_name}@${t.version}`, t])), [result]);
+  const tasks = useMemo(() => result ? new Map(result.tasks.map((t) => [`${t.package_name}@${t.version}`, t])) : live, [result, live]);
+  const finished = [...live.values()].filter((t) => ["Success", "Skipped", "Failed"].includes(t.status)).length;
   const rows = useMemo(() => [
     ...(inspection?.files.map((file) => {
       const task = tasks.get(`${file.name}@${file.version}`);
@@ -43,25 +45,35 @@ export function OfflineBundleTab() {
   const select = async () => {
     const path = await open({ directory: true, multiple: false });
     if (typeof path !== "string") return;
-    setBusy(true); setResult(null); setInspection(null); setDirectory(path);
+    setBusy(true); setResult(null); setInspection(null); setLive(new Map()); setDirectory(path);
     try { setInspection(await invoke<Inspection>("inspect_offline_bundle", { directory: path })); }
     catch (e) { toast.error("读取离线包失败", { description: String(e) }); }
     finally { setBusy(false); }
   };
 
   const upload = async () => {
-    setBusy(true); setResult(null); setProgress("准备上传…");
+    setBusy(true); setResult(null); setLive(new Map()); setProgress("准备上传…");
     let unlisten: (() => void) | undefined;
+    // 事件可能很密集，先攒到缓冲区，定时批量刷新到列表
+    const pending = new Map<string, CacheTask>();
+    const flush = () => {
+      if (pending.size === 0) return;
+      const updates = [...pending.entries()]; pending.clear();
+      setLive((prev) => { const next = new Map(prev); for (const [key, task] of updates) next.set(key, task); return next; });
+    };
+    const timer = setInterval(flush, 150);
     try {
       unlisten = await listen<CacheTask>("task-progress", ({ payload }) => {
-        if (payload.batch_id.startsWith("offline-")) setProgress(`${payload.package_name}@${payload.version} · ${uploadLabels[payload.status] ?? payload.status}`);
+        if (!payload.batch_id.startsWith("offline-")) return;
+        pending.set(`${payload.package_name}@${payload.version}`, payload);
+        setProgress(`${payload.package_name}@${payload.version} · ${uploadLabels[payload.status] ?? payload.status}`);
       });
       const report = await invoke<ImportResult>("import_offline_bundle", { directory });
       setResult(report);
       setInspection(report.inspection);
       if (report.verification) toast.info(summarizeVerification(report.verification.items));
     } catch (e) { toast.error("导入失败", { description: String(e) }); }
-    finally { unlisten?.(); setBusy(false); setProgress(""); }
+    finally { clearInterval(timer); flush(); unlisten?.(); setBusy(false); setProgress(""); }
   };
 
   return <div className="flex min-h-0 flex-1 flex-col gap-3 pt-3">
@@ -70,7 +82,7 @@ export function OfflineBundleTab() {
       <span className="truncate text-sm text-muted-foreground" title={directory}>{directory}</span></div>
     {inspection && <p className="text-sm">共 {inspection.files.length} 个文件，{inspection.files.filter((f) => f.error).length} 个校验失败{inspection.replenishment && `，附带 ${inspection.replenishment.entries.length} 条补包清单`}</p>}
     {inspection?.manifest && <p className="text-sm text-muted-foreground">已读取 manifest：{inspection.manifest.entries.length} 个文件，{inspection.manifest.failures.length} 个外网导出失败项。完整性校验失败的文件不会上传。</p>}
-    {busy && <p role="status" className="text-sm">{progress || "读取中…"}</p>}
+    {busy && <p role="status" className="text-sm">{live.size > 0 && `已完成 ${finished}/${inspection?.files.filter((f) => !f.error).length ?? 0} · `}{progress || "读取中…"}</p>}
     {result && <div className="flex flex-wrap items-center gap-3 text-sm">
       <span>上传成功或已存在 {result.tasks.filter((t) => ["Success", "Skipped"].includes(t.status)).length}/{result.tasks.length}</span>
       {result.latest.length > 0 && <span>{summarizeLatest(result.latest)}</span>}
