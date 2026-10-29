@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.1.44 (2026-10-29)
+
+### Bug Fixes
+- 修复依赖解析无法识别 npm alias（`npm:real-pkg@range`）导致 `@openai/codex` 等包的平台二进制依赖被静默漏掉的问题：按真实包名与版本范围解析 alias 依赖 (f78d7aa)
+
 ## v0.1.43 (2026-10-29)
 
 ### Bug Fixes
