@@ -1,6 +1,8 @@
 # 仓库体检：真实 Verdaccio 测试
 
-该测试是显式启用的集成测试，普通 `cargo test` 会忽略它。需要 Node.js 22+、pnpm、Rust，以及本平台的 Tauri 构建依赖；首次运行需要联网下载 Verdaccio 6。
+该测试是显式启用的集成测试，普通 `cargo test` 会忽略它。需要 Node.js 22+、pnpm、Rust，以及本平台的 Tauri 构建依赖；首次运行需要联网下载 Verdaccio 6。它覆盖当前 v0.1.44 的本地/远程体检、孤儿版本、补包清单和 latest 推进逻辑。
+
+页面操作和截图说明见 [`docs/feature-guide.md`](feature-guide.md) 与 [`docs/screenshots/README.md`](screenshots/README.md)。
 
 在仓库根目录运行：
 
@@ -30,4 +32,4 @@ node scripts/verdaccio-e2e.mjs
 Remove-Item Env:VCM_E2E_KEEP
 ```
 
-本地修复生产仓库前应先停止 Verdaccio，避免与正在写入的进程竞争。集成测试对在线服务器修改元数据仅用于注入故障，本地修复验证始终在独立副本进行。
+本地修复生产仓库前应先停止 Verdaccio，避免与正在写入的进程竞争。集成测试对在线服务器修改元数据仅用于注入故障，本地修复验证始终在独立副本进行。测试脚本不会读取或修改应用用户配置，也不会使用仓库外已有的 Verdaccio storage。

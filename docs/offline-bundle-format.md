@@ -2,6 +2,8 @@
 
 安装预检和仓库体检可以导出补包清单。在外网机器的导入页选择该 JSON，点击「导出全部补包 tarball」，将整个目录带到内网，在上传页选择「导入离线包目录」。完成后显示逐项可下载核对，并可跳转到仓库体检。
 
+推荐先阅读 [`docs/feature-guide.md`](feature-guide.md) 了解页面流程；本文件只约定 JSON 字段、文件校验和兼容行为。截图索引见 [`docs/screenshots/README.md`](screenshots/README.md)。
+
 ## replenishment.json
 
 ```json
@@ -52,3 +54,10 @@
 下载使用 packument 中的 tarball URL（缺少时回退到标准 URL），若上游声明 integrity/shasum，先核对上游摘要，再根据实际文件生成 SHA-512 integrity 和 SHA-1 shasum。上传支持 SHA-512、SHA-384、SHA-256、SHA-1 的 SRI，多摘要时仅认可最强算法；如果还提供 shasum，也必须匹配。未知算法、摘要不符、文件缺失、包名版本与清单不符的条目会标记失败且不上传。manifest 存在时，目录内未声明的 `.tgz` 也不会上传。单独选择 `.tgz` 上传同样会检查相邻的 manifest，并在实际读取上传内容时重新验证。
 
 上传附带 manifest 时不再对每个上传版本自动改 latest，而是在整批完成后，确认期望版本可下载，再调用现有 `promote_latest`。目标标签更新时只前进不回退；期望版本缺失、权限错误、超时，以及目标已是较新版本等差异都会显示。导入不带 manifest 的旧目录时保留现有上传和 latest 推进行为。
+
+## 兼容与排查
+
+- 旧的只含 `.tgz` 文件的目录仍可在「上传 .tgz」或「导入离线包目录」中使用，不会强制要求清单。
+- `replenishment.json` 只接受精确 semver；范围、重复项、非法包名和未知 schema 会在导入入口直接拒绝。
+- `manifest.json` 存在时，目录内未声明的 `.tgz` 不会上传；先检查文件名是否使用 scoped 包的 `@scope-name-version.tgz` 形式。
+- 上传后出现 latest 差异时，优先在「体检」页重新检查，确认目标 Registry 权限和 Verdaccio uplink 状态。

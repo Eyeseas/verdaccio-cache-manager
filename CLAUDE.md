@@ -2,9 +2,11 @@
 
 ## 项目概述
 
-Verdaccio Cache Manager — 桌面应用，用于把 npm 包预热到私有 Verdaccio 仓库。
+Verdaccio Cache Manager — 桌面应用，用于把 npm 包预热到私有 Verdaccio 仓库。当前侧边栏包含搜索、导入、降级、上传、体检、预检和设置七个页面；离线补包流程由 `replenishment.json` 与 `manifest.json` 串联。
 
 技术栈：Tauri v2 · React 19 · TypeScript · Rust · shadcn/ui · Tailwind CSS · zustand
+
+用户文档从 [`README.md`](README.md) 开始；页面操作见 [`docs/feature-guide.md`](docs/feature-guide.md)，离线文件格式见 [`docs/offline-bundle-format.md`](docs/offline-bundle-format.md)，截图索引见 [`docs/screenshots/README.md`](docs/screenshots/README.md)。
 
 ## 开发命令
 

@@ -1,5 +1,7 @@
 # verdaccio-cached-list
 
+配套 Verdaccio Cache Manager 的可选中间件插件。应用的「搜索 → Verdaccio」和「体检 → 远程插件」会调用本插件读取 proxy 缓存；如果应用只连接本地 publish 包，可以不安装。
+
 Verdaccio middleware plugin that exposes **all cached packages** (including proxy-cached) via a single HTTP endpoint.
 
 Verdaccio's built-in `/-/verdaccio/data/packages` only returns locally **published** packages — proxy-cached packages are absent from the result. This plugin fills that gap by scanning the storage directory directly.
@@ -62,7 +64,9 @@ Returns a JSON array:
 
 - `include_empty=1` — also return packages that have no `.tgz` on disk at all (metadata-only leftovers from uplinks). By default they are omitted. Since 0.2.0.
 
-Verdaccio Cache Manager uses `include_empty=1` and `dist_latest` for its remote storage health check, which finds versions listed in metadata without a tarball and stale `dist-tags.latest` values that break offline installs.
+健康检查模式建议使用 `include_empty=1`，这样插件会返回没有任何 tarball 的 metadata-only 包。客户端同时读取 `dist_latest`，用来判断 `dist-tags.latest` 是否指向实际存在的 tarball。插件升级后必须重启 Verdaccio 才会加载新代码。
+
+Verdaccio Cache Manager uses `include_empty=1` and `dist_latest` for its remote storage health check, which finds versions listed in metadata without a tarball and stale `dist-tags.latest` values that break offline installs. The endpoint is read-only; repairs are performed later through the Registry API by the desktop client.
 
 ## How it works
 
