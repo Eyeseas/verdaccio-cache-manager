@@ -39,27 +39,19 @@
 
 在 **npmjs** 标签下搜公网包，按勾选的版本批量推送；切到 **Verdaccio** 标签可查看私服已缓存的包并继续操作。storage 中有 tarball 但元数据未登记的版本会标记为「未登记」。
 
-| npmjs 多版本勾选 | Verdaccio 已缓存包 |
-|---|---|
-| ![](docs/screenshots/search-npmjs-versions.png) | ![](docs/screenshots/search-verdaccio-cached.png) |
-
-截图时本机没有运行中的 Verdaccio 服务，因此 Verdaccio 列表为空；配置地址和插件后会显示缓存列表。
+![](docs/screenshots/search-npmjs-versions.png)
 
 ### 依赖文件导入
 
 拖入 `package.json` / `pnpm-lock.yaml` / `package-lock.json`，或粘贴 npm/pnpm/yarn/bun 安装命令，自动解析依赖并标记哪些版本尚未缓存。`replenishment.json` 会保持精确版本，不再重新解析范围。
 
-| 空状态 | 解析后的依赖列表 |
-|---|---|
-| ![](docs/screenshots/import-empty.png) | ![](docs/screenshots/import-package-json.png) |
+![](docs/screenshots/import-empty.png)
 
 ### 本地上传
 
 选择本地项目目录，扫描 `node_modules` 并对比已缓存索引；也支持单独上传 `.tgz` 或导入带 manifest 的离线包目录。
 
-| 空状态 | 扫描结果（已缓存 / 未缓存） |
-|---|---|
-| ![](docs/screenshots/local-upload-empty.png) | ![](docs/screenshots/local-upload-scan.png) |
+![](docs/screenshots/local-upload-empty.png)
 
 ### package.json 降级
 
