@@ -717,6 +717,81 @@ pub struct DownloadSummary {
     pub success: usize,
     pub failed: usize,
     pub failures: Vec<DownloadFailure>,
+    /// 用户中途取消：已完成的包保留并写入 manifest，未开始的包不计入 success/failed。
+    pub cancelled: bool,
+}
+
+/// 导出下载中的单次请求错误；`retryable` 标记是否值得重试（网络 / 429 / 5xx）。
+#[derive(Debug)]
+struct FetchError {
+    message: String,
+    retryable: bool,
+}
+
+impl FetchError {
+    fn fatal(message: impl Into<String>) -> Self {
+        Self { message: message.into(), retryable: false }
+    }
+
+    fn status(prefix: &str, status: reqwest::StatusCode) -> Self {
+        Self {
+            message: format!("{}HTTP {}", prefix, status),
+            retryable: status.as_u16() == 429 || status.is_server_error(),
+        }
+    }
+}
+
+impl From<reqwest::Error> for FetchError {
+    /// reqwest 的错误都发生在连接 / 传输层，均视为可重试；消息展开完整错误链，
+    /// 否则只能看到 "error decoding response body" 而看不到底层的超时 / 断连原因。
+    fn from(e: reqwest::Error) -> Self {
+        let mut message = e.to_string();
+        let mut source = std::error::Error::source(&e);
+        while let Some(inner) = source {
+            let text = inner.to_string();
+            if !message.contains(&text) {
+                message.push_str(": ");
+                message.push_str(&text);
+            }
+            source = inner.source();
+        }
+        Self { message, retryable: true }
+    }
+}
+
+/// 按指数退避（0.5s 起，封顶 4s）重试可重试错误，最多额外尝试 `retries` 次。
+async fn fetch_with_retry<T, F, Fut>(
+    retries: u32,
+    mut op: F,
+    mut on_retry: impl FnMut(u32),
+) -> Result<T, String>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, FetchError>>,
+{
+    let mut attempt = 0u32;
+    loop {
+        match op().await {
+            Ok(value) => return Ok(value),
+            Err(e) if e.retryable && attempt < retries => {
+                attempt += 1;
+                on_retry(attempt);
+                let delay_ms = 500u64 << (attempt - 1).min(3);
+                tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+            }
+            Err(e) if attempt > 0 => {
+                return Err(format!("{}（已重试 {} 次）", e.message, attempt))
+            }
+            Err(e) => return Err(e.message),
+        }
+    }
+}
+
+/// 等待取消信号。发送端被 drop 视为永不取消，避免误中断下载。
+async fn wait_cancelled(rx: &mut tokio::sync::watch::Receiver<bool>) {
+    if rx.wait_for(|c| *c).await.is_err() {
+        std::future::pending::<()>().await;
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -748,9 +823,16 @@ pub fn should_promote_latest(current: Option<&str>, version: &str) -> bool {
     cur.is_prerelease() || new > cur
 }
 
+///
+/// `cancel` 置为 `true` 后：正在下载的包立即中断（删除可能写了一半的文件），
+/// 后续包不再下载，已完成的包照常写入 manifest，返回 `cancelled = true`。
+///
+/// 网络错误、HTTP 429/5xx 会按 `retries` 次数自动重试，重试时进度描述带「重试 n/N」。
 pub async fn download_tarballs_to_dir<F>(
     packages: &[(String, String)],
     output_dir: &std::path::Path,
+    retries: u32,
+    cancel: tokio::sync::watch::Receiver<bool>,
     on_progress: F,
 ) -> Result<DownloadSummary, String>
 where
@@ -760,6 +842,8 @@ where
         packages,
         output_dir,
         "https://registry.npmjs.org",
+        retries,
+        cancel,
         on_progress,
     )
     .await
@@ -769,6 +853,8 @@ pub(crate) async fn download_tarballs_from_registry<F>(
     packages: &[(String, String)],
     output_dir: &std::path::Path,
     registry: &str,
+    retries: u32,
+    mut cancel: tokio::sync::watch::Receiver<bool>,
     on_progress: F,
 ) -> Result<DownloadSummary, String>
 where
@@ -784,9 +870,11 @@ where
         .await
         .map_err(|e| format!("创建目录失败: {}", e))?;
 
+    // 用读空闲超时而非整请求超时：几十 MB 的 tarball 在慢网络下可能超过固定总时长，
+    // 但只要数据仍在流动就不应中断。
     let http = reqwest::Client::builder()
         .connect_timeout(std::time::Duration::from_secs(15))
-        .timeout(std::time::Duration::from_secs(120))
+        .read_timeout(std::time::Duration::from_secs(60))
         .build()
         .map_err(|e| format!("初始化下载客户端失败: {}", e))?;
 
@@ -801,41 +889,55 @@ where
     let mut manifest = BundleManifest::new();
     let mut metadata: HashMap<String, Result<serde_json::Value, String>> = HashMap::new();
     let mut filenames = HashSet::new();
+    let mut cancelled = false;
 
     for (index, (name, version)) in packages.into_iter().enumerate() {
+        if *cancel.borrow() {
+            cancelled = true;
+            break;
+        }
         let disk_name = if name.starts_with('@') {
             name.replace('/', "-")
         } else {
             name.clone()
         };
         let file_name = format!("{}-{}.tgz", disk_name, version);
-        on_progress(index, total, &format!("{}@{}", name, version));
-        let result = async {
+        let file_path = output_dir.join(&file_name);
+        let label = format!("{}@{}", name, version);
+        on_progress(index, total, &label);
+        let report_retry = |attempt: u32| {
+            on_progress(index, total, &format!("{}（重试 {}/{}）", label, attempt, retries));
+        };
+        let work = async {
             crate::replenishment::validate_package(name, version)?;
             if !filenames.insert(file_name.to_ascii_lowercase()) {
                 return Err("导出文件名冲突".to_string());
             }
             if !metadata.contains_key(name) {
-                let result = async {
-                    let url = format!(
-                        "{}/{}",
-                        registry.trim_end_matches('/'),
-                        name.replace('/', "%2f")
-                    );
-                    let response = http
-                        .get(url)
-                        .header("accept", "application/json")
-                        .send()
-                        .await
-                        .map_err(|e| e.to_string())?;
-                    if !response.status().is_success() {
-                        return Err(format!("获取导出元数据失败 (HTTP {})", response.status()));
-                    }
-                    response
-                        .json::<serde_json::Value>()
-                        .await
-                        .map_err(|e| e.to_string())
-                }
+                let url = format!(
+                    "{}/{}",
+                    registry.trim_end_matches('/'),
+                    name.replace('/', "%2f")
+                );
+                let result = fetch_with_retry(
+                    retries,
+                    || {
+                        // 精简版 packument 已含 dist（tarball / integrity / shasum）与 dist-tags，
+                        // 对 react 这类版本极多的包体积小一个数量级。
+                        let request = http.get(&url).header(
+                            "accept",
+                            "application/vnd.npm.install-v1+json; q=1.0, application/json; q=0.8",
+                        );
+                        async move {
+                            let response = request.send().await?;
+                            if !response.status().is_success() {
+                                return Err(FetchError::status("获取导出元数据失败: ", response.status()));
+                            }
+                            Ok(response.json::<serde_json::Value>().await?)
+                        }
+                    },
+                    &report_retry,
+                )
                 .await;
                 metadata.insert(name.clone(), result);
             }
@@ -851,17 +953,29 @@ where
                 .as_str()
                 .map(str::to_string)
                 .unwrap_or_else(|| tarball_url(registry, name, version));
-            let response = http.get(url).send().await.map_err(|e| e.to_string())?;
-            if !response.status().is_success() {
-                return Err(format!("HTTP {}", response.status()));
-            }
-            let bytes = response.bytes().await.map_err(|e| e.to_string())?;
-            verify_integrity(
-                &bytes,
-                entry["dist"]["integrity"].as_str(),
-                entry["dist"]["shasum"].as_str(),
-            )?;
-            fs::write(output_dir.join(&file_name), &bytes)
+            let bytes = fetch_with_retry(
+                retries,
+                || {
+                    let request = http.get(&url);
+                    async move {
+                        let response = request.send().await?;
+                        if !response.status().is_success() {
+                            return Err(FetchError::status("", response.status()));
+                        }
+                        let bytes = response.bytes().await?;
+                        verify_integrity(
+                            &bytes,
+                            entry["dist"]["integrity"].as_str(),
+                            entry["dist"]["shasum"].as_str(),
+                        )
+                        .map_err(FetchError::fatal)?;
+                        Ok(bytes)
+                    }
+                },
+                &report_retry,
+            )
+            .await?;
+            fs::write(&file_path, &bytes)
                 .await
                 .map_err(|e| format!("写入文件失败: {}", e))?;
             Ok(ManifestEntry {
@@ -875,8 +989,16 @@ where
                     .filter(|v| crate::parser::pinned_version(v).as_deref() == Some(*v))
                     .map(str::to_string),
             })
-        }
-        .await;
+        };
+        let result = tokio::select! {
+            result = work => result,
+            _ = wait_cancelled(&mut cancel) => {
+                // 中断时可能已写入半个文件，删除以免被当成有效 tarball。
+                let _ = fs::remove_file(&file_path).await;
+                cancelled = true;
+                break;
+            }
+        };
 
         match result {
             Ok(entry) => {
@@ -904,11 +1026,14 @@ where
     )
     .await
     .map_err(|e| format!("写入 manifest 失败: {}", e))?;
-    on_progress(total, total, "");
+    if !cancelled {
+        on_progress(total, total, "");
+    }
     Ok(DownloadSummary {
         success,
         failed: failures.len(),
         failures,
+        cancelled,
     })
 }
 

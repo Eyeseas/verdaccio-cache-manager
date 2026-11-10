@@ -24,6 +24,7 @@ use package_downgrade::{DowngradeAnalysis, OverwriteResult, SavePathResult};
 use parser::ParsedDependency;
 use registry_client::SearchResult;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use sync_engine::SyncEngine;
@@ -35,6 +36,22 @@ struct AppState {
     task_engine: Arc<Mutex<Option<Arc<TaskEngine>>>>,
     cache_db: Arc<Mutex<CacheDb>>,
     sync_engine: Arc<SyncEngine>,
+    /// 进行中的 tarball 导出：download_id → 取消信号发送端。
+    tarball_downloads: Arc<std::sync::Mutex<HashMap<String, tokio::sync::watch::Sender<bool>>>>,
+}
+
+/// 导出结束（含出错 / 取消）时从登记表移除对应取消信号。
+struct TarballDownloadGuard {
+    downloads: Arc<std::sync::Mutex<HashMap<String, tokio::sync::watch::Sender<bool>>>>,
+    id: String,
+}
+
+impl Drop for TarballDownloadGuard {
+    fn drop(&mut self) {
+        if let Ok(mut map) = self.downloads.lock() {
+            map.remove(&self.id);
+        }
+    }
 }
 
 const VERDACCIO_PLUGIN_RESOURCE_PATH: &str = "resources/verdaccio-cached-list.tgz";
@@ -709,7 +726,6 @@ async fn resolve_package_versions(
     packages: Vec<CacheRequest>,
     request_id: String,
 ) -> Result<Vec<ResolvedImportPackage>, String> {
-    use std::collections::HashMap;
     use tauri::Emitter;
     use tokio::sync::Semaphore;
 
@@ -921,11 +937,26 @@ struct DownloadProgressEvent {
 #[tauri::command]
 async fn download_tarballs(
     app_handle: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    download_id: String,
     packages: Vec<CacheRequest>,
     output_dir: String,
     replenishment: Option<replenishment::ReplenishmentList>,
 ) -> Result<registry_client::DownloadSummary, String> {
     use tauri::Emitter;
+
+    let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+    {
+        let mut map = state.tarball_downloads.lock().map_err(|e| e.to_string())?;
+        if map.contains_key(&download_id) {
+            return Err(format!("导出任务 {} 已在进行中", download_id));
+        }
+        map.insert(download_id.clone(), cancel_tx);
+    }
+    let _guard = TarballDownloadGuard {
+        downloads: state.tarball_downloads.clone(),
+        id: download_id,
+    };
 
     let pkgs: Vec<(String, String)> = packages
         .into_iter()
@@ -937,6 +968,8 @@ async fn download_tarballs(
     let summary = registry_client::download_tarballs_to_dir(
         &pkgs,
         &PathBuf::from(&output_dir),
+        config::load_config(&app_handle).retry_count,
+        cancel_rx,
         move |completed, total, current| {
             let _ = app.emit(
                 "download-tarball-progress",
@@ -949,10 +982,23 @@ async fn download_tarballs(
         },
     )
     .await?;
+    // 与部分失败一致：取消后仍写入完整补包清单，内网上传时据此核对出未导出的包。
     if let Some(list) = replenishment {
         replenishment::write_list(&PathBuf::from(&output_dir).join("replenishment.json"), &list)?;
     }
     Ok(summary)
+}
+
+/// 请求取消进行中的 tarball 导出。返回 false 表示该导出已结束或不存在。
+#[tauri::command]
+fn cancel_tarball_download(state: tauri::State<'_, AppState>, download_id: String) -> bool {
+    let Ok(map) = state.tarball_downloads.lock() else {
+        return false;
+    };
+    match map.get(&download_id) {
+        Some(tx) => tx.send(true).is_ok(),
+        None => false,
+    }
 }
 
 #[tauri::command]
@@ -1269,6 +1315,7 @@ pub fn run() {
                 task_engine: Arc::new(Mutex::new(None)),
                 cache_db: cache_db.clone(),
                 sync_engine: sync_engine.clone(),
+                tarball_downloads: Arc::new(std::sync::Mutex::new(HashMap::new())),
             });
 
             // Auto-sync if registry_url changed since last sync
@@ -1340,6 +1387,7 @@ pub fn run() {
             get_sync_info,
             clear_cache_index,
             download_tarballs,
+            cancel_tarball_download,
             unpublish_package,
             deprecate_package,
             repair_orphan_versions,

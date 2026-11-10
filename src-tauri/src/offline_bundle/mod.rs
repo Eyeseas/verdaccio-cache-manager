@@ -498,6 +498,8 @@ mod tests {
             ],
             dir.path(),
             &server.uri(),
+            0,
+            tokio::sync::watch::channel(false).1,
             |_, _, _| {},
         )
         .await
@@ -516,6 +518,118 @@ mod tests {
         );
         assert_eq!(manifest.failures.len(), 1);
         assert!(inspect(dir.path()).unwrap().files[0].error.is_none());
+    }
+
+    #[tokio::test]
+    async fn export_retries_transient_errors_but_not_missing_packages() {
+        use crate::registry_client::download_tarballs_from_registry;
+        let server = MockServer::start().await;
+        let dir = tempfile::tempdir().unwrap();
+        let bytes = tgz("flaky", "1.0.0");
+        Mock::given(path("/flaky"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "versions":{"1.0.0":{"dist":{
+                    "tarball":format!("{}/flaky.tgz",server.uri()), "integrity":integrity(&bytes)
+                }}}
+            })))
+            .mount(&server)
+            .await;
+        // 先挂载的 mock 优先匹配；用完一次后回落到成功响应。
+        Mock::given(path("/flaky.tgz"))
+            .respond_with(ResponseTemplate::new(503))
+            .up_to_n_times(1)
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(path("/flaky.tgz"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(bytes))
+            .mount(&server)
+            .await;
+        Mock::given(path("/missing"))
+            .respond_with(ResponseTemplate::new(404))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let retries_seen = std::sync::Mutex::new(Vec::new());
+        let result = download_tarballs_from_registry(
+            &[
+                ("flaky".into(), "1.0.0".into()),
+                ("missing".into(), "1.0.0".into()),
+            ],
+            dir.path(),
+            &server.uri(),
+            2,
+            tokio::sync::watch::channel(false).1,
+            |_, _, current| {
+                if current.contains("重试") {
+                    retries_seen.lock().unwrap().push(current.to_string());
+                }
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.success, 1);
+        assert_eq!(result.failed, 1);
+        assert!(result.failures[0].reason.contains("404"));
+        assert!(!result.failures[0].reason.contains("已重试"));
+        assert_eq!(*retries_seen.lock().unwrap(), vec!["flaky@1.0.0（重试 1/2）"]);
+    }
+
+    #[tokio::test]
+    async fn export_cancel_interrupts_in_flight_download_and_keeps_finished_entries() {
+        use crate::registry_client::download_tarballs_from_registry;
+        use std::time::{Duration, Instant};
+        let server = MockServer::start().await;
+        let dir = tempfile::tempdir().unwrap();
+        for (name, delay) in [("fast", 0u64), ("slow", 30)] {
+            let bytes = tgz(name, "1.0.0");
+            Mock::given(path(format!("/{name}")))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "versions":{"1.0.0":{"dist":{
+                        "tarball":format!("{}/{name}.tgz",server.uri()), "integrity":integrity(&bytes)
+                    }}}
+                })))
+                .mount(&server)
+                .await;
+            Mock::given(path(format!("/{name}.tgz")))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_body_bytes(bytes)
+                        .set_delay(Duration::from_secs(delay)),
+                )
+                .mount(&server)
+                .await;
+        }
+        let (tx, rx) = tokio::sync::watch::channel(false);
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            let _ = tx.send(true);
+            // 保持发送端存活直到下载结束，模拟 AppState 中的登记。
+            tokio::time::sleep(Duration::from_secs(60)).await;
+        });
+        let started = Instant::now();
+        let result = download_tarballs_from_registry(
+            &[
+                ("fast".into(), "1.0.0".into()),
+                ("slow".into(), "1.0.0".into()),
+                ("never".into(), "1.0.0".into()),
+            ],
+            dir.path(),
+            &server.uri(),
+            0,
+            rx,
+            |_, _, _| {},
+        )
+        .await
+        .unwrap();
+        assert!(started.elapsed() < Duration::from_secs(10));
+        assert!(result.cancelled);
+        assert_eq!(result.success, 1);
+        assert_eq!(result.failed, 0);
+        assert!(!dir.path().join("slow-1.0.0.tgz").exists());
+        let manifest = read_manifest(dir.path()).unwrap().unwrap();
+        assert_eq!(manifest.entries.len(), 1);
+        assert_eq!(manifest.entries[0].name, "fast");
     }
 
     #[tokio::test]

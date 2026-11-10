@@ -12,6 +12,8 @@ export interface DownloadSummary {
   success: number;
   failed: number;
   failures: DownloadFailure[];
+  /** 用户中途取消；已完成的包仍保留在目标目录。 */
+  cancelled: boolean;
 }
 
 function formatFailures(failures: DownloadFailure[]): string {
@@ -26,6 +28,14 @@ function formatFailures(failures: DownloadFailure[]): string {
 
 /** 根据下载汇总弹出全部成功 / 部分失败 / 全部失败三态提醒。 */
 export function toastDownloadSummary(summary: DownloadSummary) {
+  if (summary.cancelled) {
+    const failedPart = summary.failed > 0 ? `，失败 ${summary.failed} 个` : "";
+    toast.info("已取消导出", {
+      description: `已下载 ${summary.success} 个 tarball${failedPart}，其余未下载`,
+    });
+    return;
+  }
+
   if (summary.failed === 0) {
     toast.success("导出完成", {
       description: `已下载 ${summary.success} 个 tarball 到目标目录`,
@@ -56,19 +66,38 @@ export async function downloadWithProgress(
   outputDir: string,
   replenishment?: ReplenishmentList | null,
 ): Promise<DownloadSummary> {
-  const toastId = toast.loading("准备下载...", { duration: Infinity });
+  const downloadId = crypto.randomUUID();
+  let cancelling = false;
+  const cancelAction = {
+    label: "取消",
+    onClick: (event: React.MouseEvent<HTMLButtonElement>) => {
+      // 保留提示框，等后端真正停止后再给出汇总。
+      event.preventDefault();
+      if (cancelling) return;
+      cancelling = true;
+      toast.loading("正在取消...", { id: toastId, action: undefined });
+      invoke("cancel_tarball_download", { downloadId }).catch(() => {});
+    },
+  };
+  const toastId = toast.loading("准备下载...", {
+    duration: Infinity,
+    action: cancelAction,
+  });
   const unlisten = await listen<DownloadProgressEvent>(
     "download-tarball-progress",
     (event) => {
+      if (cancelling) return;
       const { completed, total, current } = event.payload;
       toast.loading(`下载中 ${completed}/${total}`, {
         id: toastId,
         description: current,
+        action: cancelAction,
       });
     },
   );
   try {
     const summary = await invoke<DownloadSummary>("download_tarballs", {
+      downloadId,
       packages,
       outputDir,
       replenishment: replenishment ?? null,

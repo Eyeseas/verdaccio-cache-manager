@@ -49,7 +49,7 @@
 }
 ```
 
-`generated_at` 为 Unix 毫秒时间戳。`entries` 仅包含成功写入的文件，`failures` 记录未成功导出的 `{name, version, reason}`，内网上传页会显示这些缺文件项。期望 latest 来自外网 packument 的 `dist-tags.latest`，没有标签时为 null；期望版本可能不包含在当前导出子集中。
+`generated_at` 为 Unix 毫秒时间戳。`entries` 仅包含成功写入的文件，`failures` 记录未成功导出的 `{name, version, reason}`，内网上传页会显示这些缺文件项。导出中途取消时同样写入 manifest：只包含取消前已完成的条目，被中断的半个文件会删除，未开始的包不出现在 `entries` 或 `failures` 中；整单导出的 `replenishment.json` 仍完整写入，用于内网核对缺失项。期望 latest 来自外网 packument 的 `dist-tags.latest`，没有标签时为 null；期望版本可能不包含在当前导出子集中。
 
 下载使用 packument 中的 tarball URL（缺少时回退到标准 URL），若上游声明 integrity/shasum，先核对上游摘要，再根据实际文件生成 SHA-512 integrity 和 SHA-1 shasum。上传支持 SHA-512、SHA-384、SHA-256、SHA-1 的 SRI，多摘要时仅认可最强算法；如果还提供 shasum，也必须匹配。未知算法、摘要不符、文件缺失、包名版本与清单不符的条目会标记失败且不上传。manifest 存在时，目录内未声明的 `.tgz` 也不会上传。单独选择 `.tgz` 上传同样会检查相邻的 manifest，并在实际读取上传内容时重新验证。
 
