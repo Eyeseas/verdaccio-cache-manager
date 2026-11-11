@@ -4,9 +4,11 @@ import { Sidebar } from "./Sidebar";
 import { TaskBar } from "./TaskBar";
 import { KeepAliveOutlet, type KeepAlivePage } from "./KeepAliveOutlet";
 import { useAutomaticHealthChecks } from "@/hooks/useAutomaticHealthChecks";
+import { useStartupUpdateCheck } from "@/hooks/useStartupUpdateCheck";
 
 export function AppLayout({ pages }: { pages: KeepAlivePage[] }) {
   useAutomaticHealthChecks();
+  useStartupUpdateCheck();
   const syncStartListening = useSyncStore((s) => s.startListening);
   const syncGetInfo = useSyncStore((s) => s.getSyncInfo);
 

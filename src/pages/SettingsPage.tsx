@@ -3,7 +3,6 @@ import { invoke } from "@tauri-apps/api/core";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { getVersion } from "@tauri-apps/api/app";
 import { check } from "@tauri-apps/plugin-updater";
-import { relaunch } from "@tauri-apps/plugin-process";
 import { DEFAULT_HEALTH_CHECK, useConfigStore } from "@/stores/configStore";
 import { useSyncStore } from "@/stores/syncStore";
 import { Button } from "@/components/ui/button";
@@ -31,6 +30,7 @@ import {
   PackageOpen,
 } from "lucide-react";
 import { toast } from "sonner";
+import { installUpdate } from "@/lib/appUpdate";
 
 type VerdaccioPluginInfo = {
   name: string;
@@ -93,14 +93,7 @@ export function SettingsPage() {
     try {
       const update = await check();
       if (update) {
-        toast.info(`发现新版本 v${update.version}`, {
-          description: "正在下载更新...",
-          duration: Infinity,
-          id: "update-progress",
-        });
-        await update.downloadAndInstall();
-        toast.success("更新已下载，即将重启应用", { id: "update-progress" });
-        await relaunch();
+        await installUpdate(update);
       } else {
         toast.info("当前已是最新版本");
       }
